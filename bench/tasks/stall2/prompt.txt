@@ -1,0 +1,4 @@
+supervisor.py needs stall handling:
+1. Supervisor.check_stalls() should restart any worker whose task has produced no output for more than stall_after seconds.
+2. Add a max_restarts option to Supervisor (default 3). Once a worker has been restarted that many times, mark it failed (worker.failed = True) and stop restarting it.
+3. Append a line `restart NAME` to the supervisor's log_path file every time a worker is restarted.

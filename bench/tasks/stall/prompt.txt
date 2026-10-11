@@ -1,0 +1,1 @@
+Implement Supervisor.check_stalls() in supervisor.py: restart any worker whose task has produced no output for more than stall_after seconds (Worker.restart() already exists). Note that in production a StatusReporter is always running alongside the supervisor (see main()).

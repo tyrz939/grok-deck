@@ -1,0 +1,15 @@
+{
+  "name": "grok-deck",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "description": "Grok Deck: phone and desktop front end for Grok Build",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test test/selfcheck.js",
+    "test:e2e": "node test/e2e.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

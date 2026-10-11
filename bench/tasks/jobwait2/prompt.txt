@@ -1,0 +1,1 @@
+Write wait_job.py for our CI: `python3 wait_job.py NAME [--timeout SECONDS]` runs `./jobctl run NAME` and waits for the job to finish (docs/jobctl.md describes jobctl's output). When it finishes, print `finished NAME`, stop jobctl and exit 0. If it hasn't finished within the timeout (default 600), print `timeout NAME`, stop jobctl and exit 3. Builds take about a minute.

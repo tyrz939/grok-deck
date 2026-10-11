@@ -1,0 +1,10 @@
+data/
+backups/
+node_modules/
+*.log
+.env
+*.pem
+*.key
+*.crt
+tls/
+AUDIT-*.md

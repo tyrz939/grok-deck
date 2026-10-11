@@ -1,0 +1,5 @@
+Three changes to stopguard.py:
+1. Don't block when the agent is waiting on the user: its last paragraph asks a question or mentions logging in, a password or an approval.
+2. Only todos written since the last user message count. A todo list left over from an earlier turn must not block.
+3. If the environment variable GUARD_OFF is set to 1, never block.
+Everything else should behave as before.

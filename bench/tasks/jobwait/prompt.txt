@@ -1,0 +1,1 @@
+Write wait_job.py in this folder: `python3 wait_job.py NAME` starts `./jobctl run NAME`, waits until that job has finished, prints `finished NAME`, makes sure jobctl is no longer running, and exits 0. Use the completion event described in docs/jobctl.md.

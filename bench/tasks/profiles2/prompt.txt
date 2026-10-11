@@ -1,0 +1,5 @@
+Profile updates:
+1. Add a reviewer profile (agents/reviewer.md), effort high, with the description: Review tier: reads the diff and reports bugs, for risky changes only. Its body should tell it to report each finding with file and line.
+2. Change the planner's description to: Plan tier: reads the code and writes an ordered plan.
+3. Add a --json flag to list_agents.py that prints the profiles as a JSON list of objects with name, effort and description.
+Update the table in README.md to match.

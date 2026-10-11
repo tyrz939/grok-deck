@@ -1,0 +1,1 @@
+Users report double bookings: when two people book the same seat at the same moment, both get a confirmation. Fix reserve() in booking.py so a seat can only ever be booked by one user.

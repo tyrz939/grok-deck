@@ -1,0 +1,1 @@
+Users now need an email address. Change users.py so add_user(name, email) requires an email and stores it, and get_user returns it as well. Existing users get an empty email.

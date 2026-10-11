@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="strokeGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#8b5cf6"/>
+      <stop offset="100%" stop-color="#3b82f6"/>
+    </linearGradient>
+    <filter id="softGlow" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur in="SourceGraphic" stdDeviation="18" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <filter id="cursorGlow" x="-50%" y="-200%" width="200%" height="500%" filterUnits="objectBoundingBox">
+      <feGaussianBlur in="SourceGraphic" stdDeviation="14" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- Full-bleed black background for iOS rounding -->
+  <rect width="1024" height="1024" fill="#000000"/>
+
+  <!-- Centred 640x640 rounded square outline: (1024-640)/2 = 192 -->
+  <rect x="192" y="192" width="640" height="640" rx="120" ry="120"
+        fill="none" stroke="url(#strokeGrad)" stroke-width="36"
+        filter="url(#softGlow)"/>
+
+  <!-- Prompt pair optically centred as a group -->
+  <g>
+    <!-- Bold white '>' chevron -->
+    <polyline points="390,400 500,512 390,624"
+              fill="none" stroke="#ffffff" stroke-width="56"
+              stroke-linecap="round" stroke-linejoin="round"/>
+    <!-- Glowing blue underscore as a rounded rect (line filters are zero-height) -->
+    <rect x="545" y="556" width="160" height="48" rx="24" ry="24"
+          fill="#3b82f6" filter="url(#cursorGlow)"/>
+  </g>
+</svg>

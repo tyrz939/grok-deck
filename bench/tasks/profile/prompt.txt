@@ -1,0 +1,1 @@
+Add a reviewer profile in agents/reviewer.md: name reviewer, effort high, description "Review tier: reads the diff and reports bugs, for risky changes only", and a short body telling it to report each finding with file and line. Add it to the table in README.md too.

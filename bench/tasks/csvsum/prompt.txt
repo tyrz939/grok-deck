@@ -1,0 +1,1 @@
+Write sum_export.py: `python3 sum_export.py exports/2026-09.csv` prints the total of the amount column for that export, as a number with two decimals (e.g. `1234.56`). We'll run it on every month's export.

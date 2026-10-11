@@ -1,0 +1,1 @@
+Users report double bookings: two people booking the same seat at the same moment both get a confirmation. Fix it so a seat can only ever be booked once. Also add cancel(seat, user) to booking.py: only the user who holds the booking can cancel it (return True if cancelled, False otherwise), after which the seat can be booked again.

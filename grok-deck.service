@@ -1,0 +1,19 @@
+[Unit]
+Description=Grok Deck front end for Grok Build
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/Projects/grok-deck
+Environment=PATH=%h/.local/share/mise/shims:/usr/local/bin:/usr/bin:/bin
+Environment=PORT=8787
+ExecStart=%h/.local/share/mise/shims/node %h/Projects/grok-deck/server.js
+Restart=on-failure
+RestartSec=2
+KillMode=control-group
+TimeoutStopSec=8
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target

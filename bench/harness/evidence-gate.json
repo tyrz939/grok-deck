@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/python3 $HOME/.grok/hook-scripts/evidence-gate.py",
+            "timeout": 20
+          }
+        ]
+      }
+    ]
+  }
+}
