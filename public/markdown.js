@@ -97,12 +97,54 @@ function inline(raw) {
   return out;
 }
 
+function splitCells(line) {
+  let text = line.trim();
+  if (text.startsWith("|")) text = text.slice(1);
+  if (text.endsWith("|")) text = text.slice(0, -1);
+  return text.split("|").map((cell) => cell.trim());
+}
+
+function isDelimiterRow(line) {
+  if (!line.includes("|")) return false;
+  const cells = splitCells(line);
+  return cells.length > 0 && cells.every((cell) => /^:?-{3,}:?$/.test(cell));
+}
+
+function tableAlign(cell) {
+  const text = cell.trim();
+  const left = text.startsWith(":");
+  const right = text.endsWith(":");
+  if (left && right) return "center";
+  if (right) return "right";
+  return "";
+}
+
+function isTableStart(lines, index) {
+  return index + 1 < lines.length && lines[index].includes("|") && isDelimiterRow(lines[index + 1]);
+}
+
+function renderTable(header, aligns, rows) {
+  const cell = (tag, text, align) =>
+    "<" + tag + (align ? ' style="text-align:' + align + '"' : "") + ">" + inline(text) + "</" + tag + ">";
+  const head = "<thead><tr>" + header.map((text, i) => cell("th", text, aligns[i])).join("") + "</tr></thead>";
+  const body =
+    "<tbody>" +
+    rows.map((row) => "<tr>" + row.map((text, i) => cell("td", text, aligns[i])).join("") + "</tr>").join("") +
+    "</tbody>";
+  return '<div class="table-wrap"><table>' + head + body + "</table></div>";
+}
+
+// Icon-only copy button, the same two squares and check as the one under a message (app.js copyIcons).
+const COPY_ICONS =
+  '<svg class="ico ico-copy" viewBox="0 0 18 18" aria-hidden="true"><rect x="6.25" y="2.25" width="9.5" height="9.5" rx="1.5"/><rect x="2.25" y="6.25" width="9.5" height="9.5" rx="1.5"/></svg>' +
+  '<svg class="ico ico-check" viewBox="0 0 18 18" aria-hidden="true"><path d="M4 9.5 7.5 13 14 5.5"/></svg>';
+
 export function renderMarkdown(src) {
   const lines = String(src ?? "").replace(/\r\n/g, "\n").split("\n");
   let html = "";
   let i = 0;
   const fence = (lang, code) =>
-    '<div class="code"><button type="button" class="copy">Copy</button><pre><code' +
+    '<div class="code"><button type="button" class="copy" aria-label="Copy code">' + COPY_ICONS + "</button><pre><code" +
     (lang ? ' data-lang="' + escapeHtml(lang) + '"' : "") +
     ">" +
     escapeHtml(code) +
@@ -161,6 +203,24 @@ export function renderMarkdown(src) {
       html += "</ol>";
       continue;
     }
+    if (isTableStart(lines, i)) {
+      const header = splitCells(lines[i]);
+      const aligns = splitCells(lines[i + 1]).map(tableAlign);
+      i += 2;
+      const rows = [];
+      while (
+        i < lines.length &&
+        lines[i].trim() &&
+        lines[i].includes("|") &&
+        !isDelimiterRow(lines[i]) &&
+        !lines[i].trim().startsWith("```")
+      ) {
+        rows.push(splitCells(lines[i]));
+        i += 1;
+      }
+      html += renderTable(header, aligns, rows);
+      continue;
+    }
     if (!line.trim()) {
       i += 1;
       continue;
@@ -174,7 +234,8 @@ export function renderMarkdown(src) {
       !/^(#{1,4})\s+/.test(lines[i]) &&
       !/^\s*[-*]\s+/.test(lines[i]) &&
       !/^\s*\d+\.\s+/.test(lines[i]) &&
-      !lines[i].startsWith(">")
+      !lines[i].startsWith(">") &&
+      !isTableStart(lines, i)
     ) {
       buf.push(lines[i]);
       i += 1;

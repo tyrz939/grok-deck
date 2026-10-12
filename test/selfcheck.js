@@ -3,23 +3,21 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { existsSync } from "node:fs";
-import { homedir } from "node:os";
 import { parseUpdates } from "../lib/history.js";
 import { cleanImages } from "../lib/images.js";
 import { hostAllowedName, isAllowedIp, isPrivateLan, lanHostAllowed } from "../lib/net.js";
-import { contrastText, cssColor, parseColors, prettifySlug, slugifyName, themeCss } from "../lib/theme.js";
+import { contrastText, cssColor, neutralThemeColor, neutralVars, parseColors, prettifySlug, slugifyName, themeCss } from "../lib/theme.js";
 import { applyEvent, extractImages, plainText } from "../public/reduce.js";
 import { copyText } from "../public/clipboard.js";
 import { composerAction, hasComposerContent } from "../public/composer.js";
+import { applyReasoning, longRunActive, modeChoice, reasoningChoice, reasoningChipText, ULTRA_HELP } from "../public/options.js";
+import { renderMarkdown, setImageSession } from "../public/markdown.js";
+import { accountBody, createBillingCache, parseBilling, planUsageLabel } from "../lib/billing.js";
+import { lastMessageSnippet } from "../lib/sessions.js";
 import { hasDone, intervalLabel, parseInterval, parseLoopCommand, runLabel, validateLoop } from "../lib/loops.js";
 
-// Hook scripts live outside this repo (default ~/.grok/hook-scripts); set GROK_HOOKS_DIR to point elsewhere.
-const HOOK_DIR = process.env.GROK_HOOKS_DIR || path.join(homedir(), ".grok", "hook-scripts");
-const hookTest = existsSync(path.join(HOOK_DIR, "evidence-gate.py")) ? test : test.skip;
-
 test("allows only loopback and Tailscale", () => {
-  for (const ip of ["127.0.0.1", "127.0.0.2", "::1", "::ffff:127.0.0.1", "100.64.0.1", "100.100.10.20", "100.127.255.255"]) {
+  for (const ip of ["127.0.0.1", "127.0.0.2", "::1", "::ffff:127.0.0.1", "100.64.0.1", "100.100.1.2", "100.127.255.255"]) {
     assert.equal(isAllowedIp(ip), true, ip);
   }
   for (const ip of ["8.8.8.8", "10.1.2.3", "192.168.1.50", "172.16.0.1", "172.31.255.255", "1.1.1.1", "100.63.1.1", "100.128.0.1", "0.0.0.0", "", "not-an-ip"]) {
@@ -72,6 +70,15 @@ foreground = "#ECE5D8"
   const css = themeCss({ vars: { "--bg": "#abc</style><form action=http://evil>", "--fg": "#ECE5D8", "color": "red" } });
   assert.equal(css.includes("</style>"), false);
   assert.match(css, /--fg:#ECE5D8/);
+  const dark = themeCss({ vars: neutralVars("dark") });
+  const light = themeCss({ vars: neutralVars("light") });
+  assert.match(dark, /--bg:#000000/);
+  assert.match(dark, /--accent:#ffffff/);
+  assert.match(light, /--bg:#ffffff/);
+  assert.match(light, /--accent:#000000/);
+  assert.equal(neutralThemeColor("light"), "#ffffff");
+  assert.equal(neutralThemeColor("nope"), "#000000");
+  assert.equal(dark.includes("#7aa2f7"), false);
 });
 
 test("reduces streaming events without duplicating snapshots", () => {
@@ -171,7 +178,7 @@ test("keeps image blocks out of text and on the message", () => {
 });
 
 test("stores a scrypt hash and a session cookie secret", async () => {
-  const dir = await mkdtemp(path.join(tmpdir(), "grok-mobile-auth-"));
+  const dir = await mkdtemp(path.join(tmpdir(), "grok-deck-auth-"));
   process.env.DATA_DIR = dir;
   try {
     const auth = await import("../lib/auth.js");
@@ -188,6 +195,16 @@ test("stores a scrypt hash and a session cookie secret", async () => {
     const raw = await import("node:fs/promises").then((fs) => fs.readFile(path.join(dir, "auth.json"), "utf8"));
     assert.equal(raw.includes("correct horse battery"), false);
     assert.match(raw, /scrypt|hash/i);
+    const sessions = await import("../lib/sessions.js");
+    assert.equal(sessions.cleanAppearance("light"), "light");
+    assert.equal(sessions.cleanAppearance("dark"), "dark");
+    assert.equal(sessions.cleanAppearance("nope"), "dark");
+    assert.equal(await sessions.getAppearance(), "dark");
+    assert.equal(await sessions.setAppearance("light"), "light");
+    assert.equal(await sessions.getAppearance(), "light");
+    assert.equal(await sessions.setAppearance("nope"), "dark");
+    const meta = await import("node:fs/promises").then((fs) => fs.readFile(path.join(dir, "meta.json"), "utf8"));
+    assert.match(meta, /"appAppearance": "dark"/);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -224,7 +241,7 @@ test("tracks subagents, nested steps and their approvals", async () => {
   const { subagentEvent } = await import("../lib/runner.js");
   const { applyEvent } = await import("../public/reduce.js");
   const { parseUpdates } = await import("../lib/history.js");
-  const spawned = subagentEvent({ sessionUpdate: "subagent_spawned", subagent_id: "s1", child_session_id: "s1", description: "plan it", subagent_type: "grok-mobile-ultra:planner" });
+  const spawned = subagentEvent({ sessionUpdate: "subagent_spawned", subagent_id: "s1", child_session_id: "s1", description: "plan it", subagent_type: "grok-deck-ultra:planner" });
   assert.equal(spawned.name, "plan it");
   const state = { messages: [] };
   applyEvent(state, spawned);
@@ -372,7 +389,7 @@ test("subagent tokens and a wake during start are counted and blocked", () => {
   assert.equal(canOpenWake(turn, "s", "agent_message_chunk", new Set()), true);
 });
 
-hookTest("evidence hook blocks a no-op and allows a real check after the edit", async () => {
+test("evidence hook blocks a no-op and allows a real check after the edit", async () => {
   const home = await mkdtemp(path.join(tmpdir(), "gm-hook-"));
   const sid = "sid-evidence-1";
   const dir = path.join(home, "sessions", "proj", sid);
@@ -385,7 +402,7 @@ hookTest("evidence hook blocks a no-op and allows a real check after the edit", 
   ];
   const run = async (command) => {
     await writeFile(path.join(dir, "updates.jsonl"), base.concat(row({ sessionUpdate: "tool_call_update", toolCallId: "b1", status: "completed", rawOutput: { type: "Bash", command, exit_code: 0 } })).join(""));
-    return spawnSync("python3", [HOOK_DIR + "/evidence-gate.py"], {
+    return spawnSync("python3", [`${process.env.HOME}/.grok/hook-scripts/evidence-gate.py`], {
       input: JSON.stringify({ sessionId: sid, reason: "end_turn", lastAssistantMessage: "Done." }),
       encoding: "utf8",
       env: { ...process.env, GROK_HOME: home, HOME: home },
@@ -398,7 +415,7 @@ hookTest("evidence hook blocks a no-op and allows a real check after the edit", 
   await rm(home, { recursive: true, force: true });
 });
 
-hookTest("open todos still block a let-me-know stop, and subagent_stop is a subagent", async () => {
+test("open todos still block a let-me-know stop, and subagent_stop is a subagent", async () => {
   const home = await mkdtemp(path.join(tmpdir(), "gm-hook2-"));
   const sid = "sid-continue-1";
   const dir = path.join(home, "sessions", "proj", sid);
@@ -408,7 +425,7 @@ hookTest("open todos still block a let-me-know stop, and subagent_stop is a suba
     row({ sessionUpdate: "user_message_chunk", content: { type: "text", text: "do the work" } }),
     row({ sessionUpdate: "plan", entries: [{ content: "finish the thing", status: "pending" }] }),
   ].join(""));
-  const hook = HOOK_DIR + "/continue-until-done.py";
+  const hook = `${process.env.HOME}/.grok/hook-scripts/continue-until-done.py`;
   const env = { ...process.env, GROK_HOME: home, HOME: home };
   const todo = spawnSync("python3", [hook], {
     input: JSON.stringify({ sessionId: sid, reason: "end_turn", lastAssistantMessage: "let me know if you want edits" }),
@@ -439,10 +456,10 @@ const editOf = (proof, id, file) => {
 };
 
 test("proof line: notes-only turns are not flagged, code edits still are", () => {
-  for (const p of ["/h/proj/topics/notes.md", "PLAN.md", "PROGRESS", "notes.txt", "/h/.grok/memory/x.json", "a/notes/b"]) assert.ok(isNotePath(p), p);
+  for (const p of ["/h/vm/topics/population.md", "PLAN.md", "PROGRESS", "notes.txt", "/h/.grok/memory/x.json", "a/notes/b"]) assert.ok(isNotePath(p), p);
   for (const p of ["src/app.js", "main.py", "Makefile", "", "PLANNER.js"]) assert.ok(!isNotePath(p), p);
   const notes = newProof();
-  editOf(notes, "a", "/p/topics/notes.md");
+  editOf(notes, "a", "/p/topics/population.md");
   editOf(notes, "b", "/p/PROGRESS.md");
   assert.equal(proofVerdict(notes), null);
   assert.equal(proofSummary(notes).edits, 0);
@@ -492,7 +509,7 @@ test("ACP: a request with a timeout rejects instead of hanging forever", async (
   }
 });
 
-const HOOKS = HOOK_DIR;
+const HOOKS = path.join(process.env.HOME, ".grok", "hook-scripts");
 async function hookHome(lines) {
   const home = await mkdtemp(path.join(tmpdir(), "gm-hook-"));
   const dir = path.join(home, "sessions", "cwd", "s1");
@@ -507,8 +524,8 @@ const edit = (id, file) => [
   { sessionUpdate: "tool_call_update", toolCallId: id, status: "completed", content: [{ type: "diff", path: file }], rawOutput: { type: "SearchReplace" } },
 ];
 
-hookTest("evidence-gate hook: notes-only turns pass, code edits are still gated", async () => {
-  const notes = await hookHome([user("update notes"), ...edit("a", "/p/topics/notes.md"), ...edit("b", "/p/PLAN.md")]);
+test("evidence-gate hook: notes-only turns pass, code edits are still gated", async () => {
+  const notes = await hookHome([user("update notes"), ...edit("a", "/p/topics/population.md"), ...edit("b", "/p/PLAN.md")]);
   assert.equal(runHook("evidence-gate.py", notes, { lastAssistantMessage: "Updated the notes." }), "");
   const code = await hookHome([user("fix it"), ...edit("a", "/p/server.js"), ...edit("b", "/p/NOTES.md")]);
   assert.match(runHook("evidence-gate.py", code, { lastAssistantMessage: "Fixed." }), /"decision": "block"/);
@@ -516,7 +533,7 @@ hookTest("evidence-gate hook: notes-only turns pass, code edits are still gated"
   await rm(code, { recursive: true, force: true });
 });
 
-hookTest("continue hook: a continue count from an earlier turn does not cap the new turn", async () => {
+test("continue hook: a continue count from an earlier turn does not cap the new turn", async () => {
   const plan = { sessionUpdate: "plan", entries: [{ content: "step two", status: "pending" }] };
   const home = await hookHome([user("old ask"), { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "ok" } }, user("new ask"), plan]);
   await mkdir(path.join(home, "hook-state"), { recursive: true });
@@ -570,6 +587,39 @@ test("copyText uses clipboard when available and falls back to a textarea", asyn
   assert.equal(await copyText("nope", nowhere), false);
 });
 
+test("markdown tables scroll in their own box and fences stay code", () => {
+  const html = renderMarkdown(
+    [
+      "Before the table.",
+      "",
+      "| Name | Value |",
+      "| :--- | ---: |",
+      "| alpha | beta |",
+      "",
+      "```",
+      "code | still | code",
+      "```",
+      "",
+      "After.",
+    ].join("\n"),
+  );
+  assert.match(html, /<div class="table-wrap"><table>/);
+  assert.match(html, /<th style="text-align:right">Value<\/th>/);
+  assert.match(html, /<td>alpha<\/td>/);
+  assert.match(html, /<td style="text-align:right">beta<\/td>/);
+  assert.match(html, /<div class="code">/);
+  assert.match(html, /code \| still \| code/);
+  assert.match(html, /<p>Before the table\.<\/p>/);
+  assert.match(html, /<p>After\.<\/p>/);
+  assert.doesNotMatch(html, /<p>[^<]*\| Name/);
+  setImageSession("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
+  const img = renderMarkdown("![wide](wide.png)");
+  assert.match(img, /class="shots md-shot"/);
+  assert.match(img, /src="\/api\/sessions\/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\/file\?p=wide\.png"/);
+  setImageSession("");
+  assert.equal(renderMarkdown("![wide](wide.png)"), "<p>![wide](wide.png)</p>");
+});
+
 test("composer action slot: Send / Stop / Send now swap (images count as content)", () => {
   assert.deepEqual(composerAction({}), { label: "Send", mode: "send" });
   assert.deepEqual(composerAction({ running: true, chat: false, hasContent: true }), { label: "Send", mode: "send" });
@@ -581,6 +631,40 @@ test("composer action slot: Send / Stop / Send now swap (images count as content
   assert.equal(hasComposerContent("hi", 0), true);
   assert.equal(hasComposerContent("  ", 1), true);
   assert.equal(hasComposerContent("", 2), true);
+});
+
+test("composer toolbar: mode priority and Ultra reasoning", () => {
+  assert.deepEqual(reasoningChoice({ effort: "high", ultra: false }), { id: "high", label: "high", effort: "high", ultra: false });
+  assert.deepEqual(reasoningChoice({ effort: "low", ultra: true }), { id: "ultra", label: "Ultra", effort: "xhigh", ultra: true });
+  assert.deepEqual(reasoningChoice({}), { id: "high", label: "high", effort: "high", ultra: false });
+  assert.deepEqual(reasoningChoice({ effort: "nope" }), { id: "high", label: "high", effort: "high", ultra: false });
+  assert.deepEqual(applyReasoning("ultra"), { effort: "xhigh", ultra: true });
+  assert.deepEqual(applyReasoning("xhigh"), { effort: "xhigh", ultra: false });
+  assert.deepEqual(applyReasoning("low"), { effort: "low", ultra: false });
+  assert.deepEqual(applyReasoning("medium"), { effort: "medium", ultra: false });
+  assert.deepEqual(applyReasoning("nope"), { effort: "high", ultra: false });
+  assert.equal(longRunActive({ status: "running" }), true);
+  assert.equal(longRunActive({ status: "paused" }), true);
+  assert.equal(longRunActive({ status: "done" }), false);
+  assert.equal(longRunActive(true), true);
+  assert.equal(longRunActive(null), false);
+  assert.deepEqual(modeChoice({}), { id: "normal", label: "Normal" });
+  assert.deepEqual(modeChoice({ plan: true }), { id: "plan", label: "Plan" });
+  assert.deepEqual(modeChoice({ plan: true, longRun: { status: "running" } }), { id: "long", label: "Long run" });
+  assert.deepEqual(modeChoice({ plan: true, longRun: { status: "done" }, loops: [{ status: "active" }] }), { id: "plan", label: "Plan" });
+  assert.deepEqual(modeChoice({ longRun: { status: "stopped" }, loops: [{ status: "paused" }] }), { id: "normal", label: "Normal" });
+  assert.deepEqual(modeChoice({ loops: [{ status: "active" }] }), { id: "loops", label: "Loops" });
+  assert.deepEqual(modeChoice({ longRun: true, plan: true }), { id: "long", label: "Long run" });
+  assert.match(ULTRA_HELP, /pstack's poteto-mode/);
+  assert.match(ULTRA_HELP, /plan, build, review, and unslop/);
+  assert.equal(ULTRA_HELP.includes("\u2014"), false);
+  assert.equal(reasoningChipText("high", "grok-4.7"), "Grok 4.7 High");
+  assert.equal(reasoningChipText("ultra", "grok-4.7"), "Ultra");
+  assert.equal(reasoningChipText("xhigh", "grok-4.7-build-fast"), "Grok 4.7 Fast Extra high");
+  assert.equal(reasoningChipText("low", "grok-4.5"), "Grok 4.5 Low");
+  assert.equal(reasoningChipText("medium", "grok-4.6"), "Grok 4.6 Medium");
+  assert.equal(reasoningChipText("high", ""), "Grok 4.7 High");
+  assert.equal(reasoningChipText("nope", "custom-model"), "Custom Model High");
 });
 
 
@@ -611,4 +695,153 @@ test("loop limits, run labels and DONE detection", () => {
   assert.equal(hasDone("All checks pass. DONE"), true);
   assert.equal(hasDone("not done yet"), false);
   assert.equal(hasDone("UNDONE"), false);
+});
+
+test("session list reports token use without reading the transcript", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "gm-tokens-"));
+  const data = await mkdtemp(path.join(tmpdir(), "gm-tokens-data-"));
+  const withUse = "11111111-2222-4333-8444-555555555555";
+  const bare = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+  try {
+    const group = path.join(home, "sessions", "proj");
+    await mkdir(path.join(group, withUse), { recursive: true });
+    await mkdir(path.join(group, bare), { recursive: true });
+    await writeFile(path.join(group, withUse, "summary.json"), JSON.stringify({ generated_title: "Token session", info: { cwd: "/tmp/proj" } }));
+    await writeFile(path.join(group, withUse, "usage.json"), JSON.stringify({ session: { totalTokens: 128000 } }));
+    await writeFile(path.join(group, withUse, "signals.json"), JSON.stringify({ contextTokensUsed: 12000, contextWindowTokens: 128000 }));
+    await writeFile(path.join(group, bare, "summary.json"), JSON.stringify({ generated_title: "Empty session", info: { cwd: "/tmp/proj" } }));
+    await writeFile(path.join(group, bare, "usage.json"), "{");
+    const mod = new URL("../lib/sessions.js", import.meta.url).href;
+    const run = spawnSync(process.execPath, ["--input-type=module", "-e", `import { listSessions } from ${JSON.stringify(mod)};\nconst rows = await listSessions();\nprocess.stdout.write(JSON.stringify(rows));`], {
+      env: { ...process.env, GROK_HOME: home, DATA_DIR: data },
+      encoding: "utf8",
+    });
+    assert.equal(run.status, 0, run.stderr);
+    const rows = JSON.parse(run.stdout);
+    const used = rows.find((row) => row.id === withUse);
+    const empty = rows.find((row) => row.id === bare);
+    assert.equal(used.title, "Token session");
+    assert.equal(used.tokens, 128000);
+    assert.deepEqual(used.context, { used: 12000, window: 128000 });
+    assert.equal(empty.title, "Empty session");
+    assert.equal(empty.tokens, 0);
+    assert.equal(empty.context, undefined);
+    assert.equal(used.snippet, "");
+    assert.equal(empty.snippet, "");
+  } finally {
+    await rm(home, { recursive: true, force: true });
+    await rm(data, { recursive: true, force: true });
+  }
+});
+
+test("session list snippet is the last message, one line", () => {
+  const line = (update) => JSON.stringify({ params: { update } });
+  const chunk = (kind, text) => line({ sessionUpdate: kind, content: { type: "text", text } });
+  const text = [
+    chunk("user_message_chunk", "earlier question"),
+    chunk("agent_message_chunk", "Hello "),
+    chunk("agent_message_chunk", "there\nfriend"),
+    line({ sessionUpdate: "tool_call", title: "run" }),
+  ].join("\n");
+  assert.equal(lastMessageSnippet(text), "Hello there friend");
+  const long = "snippet ".repeat(40);
+  assert.equal(lastMessageSnippet(chunk("agent_message_chunk", long)).endsWith("..."), true);
+  assert.ok(lastMessageSnippet(chunk("agent_message_chunk", long)).length <= 140);
+  assert.equal(lastMessageSnippet("not json\n"), "");
+  assert.equal(lastMessageSnippet(""), "");
+});
+
+test("plan quota percent comes from billing config, not from session totals", async () => {
+  const weekly = parseBilling({
+    config: { creditUsagePercent: 42, currentPeriod: { type: "USAGE_PERIOD_TYPE_WEEKLY" } },
+    subscription_tier: "Example",
+    session: { totalTokens: 128000 },
+  });
+  assert.deepEqual(weekly, { percent: 42, period: "week" });
+  assert.equal(planUsageLabel(weekly), "42% this week");
+  assert.deepEqual(accountBody({ config: { creditUsagePercent: 42, currentPeriod: { type: "USAGE_PERIOD_TYPE_WEEKLY" } } }), {
+    available: true,
+    percent: 42,
+    period: "week",
+    label: "42% this week",
+  });
+  const monthly = parseBilling({ config: { creditUsagePercent: 7.2, currentPeriod: { type: "USAGE_PERIOD_TYPE_MONTHLY" } } });
+  assert.equal(monthly.period, "month");
+  assert.equal(planUsageLabel(monthly), "7% this month");
+  const other = parseBilling({ config: { creditUsagePercent: 0, currentPeriod: { type: "CUSTOM" } } });
+  assert.deepEqual(other, { percent: 0, period: null });
+  assert.equal(planUsageLabel(other), "0% of plan");
+  assert.equal(planUsageLabel(parseBilling({ config: { creditUsagePercent: 140.4, currentPeriod: { type: "USAGE_PERIOD_TYPE_WEEKLY" } } })), "140% this week");
+  for (const raw of [null, {}, { config: {} }, { config: { creditUsagePercent: "42" } }, { creditUsagePercent: 42 }, { config: { creditUsagePercent: Number.NaN } }, { session: { totalTokens: 128000 } }]) {
+    assert.equal(parseBilling(raw), null, JSON.stringify(raw));
+    assert.deepEqual(accountBody(raw), { available: false });
+  }
+
+  let calls = 0;
+  let now = 0;
+  const cache = createBillingCache({
+    load: async () => {
+      calls += 1;
+      return { available: true, percent: calls, period: "week", label: calls + "% this week" };
+    },
+    now: () => now,
+    ttlMs: 1000,
+    failTtlMs: 50,
+  });
+  const [a, b] = await Promise.all([cache.get(), cache.get()]);
+  assert.equal(calls, 1);
+  assert.equal(a.percent, 1);
+  assert.deepEqual(b, a);
+  now = 999;
+  assert.equal((await cache.get()).percent, 1);
+  assert.equal(calls, 1);
+  cache.invalidate();
+  assert.equal((await cache.get()).percent, 2);
+  now = 1998;
+  assert.equal((await cache.get()).percent, 2);
+  now = 1999;
+  assert.equal((await cache.get()).percent, 3);
+
+  const pending = [];
+  const raced = createBillingCache({
+    load: () => new Promise((resolve) => pending.push(resolve)),
+    now: () => 0,
+    ttlMs: 1000,
+    failTtlMs: 50,
+  });
+  const first = raced.get();
+  await Promise.resolve();
+  assert.equal(pending.length, 1);
+  raced.invalidate();
+  const second = raced.get();
+  await Promise.resolve();
+  assert.equal(pending.length, 2);
+  pending[0]({ available: true, percent: 9, period: "week", label: "9% this week" });
+  pending[1]({ available: true, percent: 4, period: "week", label: "4% this week" });
+  assert.equal((await first).percent, 9);
+  assert.equal((await second).percent, 4);
+  assert.equal((await raced.get()).percent, 4);
+  assert.equal(pending.length, 2);
+
+  let fail = true;
+  let fails = 0;
+  const down = createBillingCache({
+    load: async () => {
+      fails += 1;
+      if (fail) throw new Error("nope");
+      return { available: true, percent: 1, period: "month", label: "1% this month" };
+    },
+    now: () => now,
+    ttlMs: 1000,
+    failTtlMs: 50,
+  });
+  now = 0;
+  assert.deepEqual(await down.get(), { available: false });
+  now = 49;
+  assert.deepEqual(await down.get(), { available: false });
+  assert.equal(fails, 1);
+  now = 50;
+  fail = false;
+  assert.equal((await down.get()).label, "1% this month");
+  assert.equal(fails, 2);
 });

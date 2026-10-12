@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-appearance="dark">
   <head>
     <meta charset="utf-8" />
     <meta
@@ -19,10 +19,22 @@
     <link rel="icon" href="/icon.svg" type="image/svg+xml" />
     <link rel="icon" href="/icon-192.png" type="image/png" />
     <!--THEME-->
+    <script src="/appearance.js"></script>
     <link rel="stylesheet" href="/app.css" />
   </head>
   <body>
     <aside id="side" hidden></aside>
+    <div
+      id="side-resize"
+      role="separator"
+      aria-orientation="vertical"
+      aria-label="Resize sessions"
+      aria-valuemin="220"
+      aria-valuemax="480"
+      aria-valuenow="280"
+      tabindex="0"
+      hidden
+    ></div>
     <div id="keys" hidden></div>
     <div id="app">
       <header id="top"></header>
@@ -33,24 +45,31 @@
         <div id="skeptic" hidden></div>
         <div id="queue" hidden></div>
         <div id="thumbs" hidden></div>
-        <button type="button" id="attach" aria-label="Menu" aria-haspopup="dialog">+</button>
-        <label class="sr" for="input">Message</label>
-        <textarea
-          id="input"
-          rows="1"
-          enterkeyhint="enter"
-          autocomplete="off"
-          autocapitalize="sentences"
-          spellcheck="true"
-          placeholder="Message"
-        ></textarea>
-        <div class="actions">
-          <button type="submit" id="send">Send</button>
+        <div id="chat-meta" class="chat-meta" hidden></div>
+        <div class="composer-bar">
+          <label class="sr" for="input">Message</label>
+          <textarea
+            id="input"
+            rows="1"
+            enterkeyhint="enter"
+            autocomplete="off"
+            autocapitalize="sentences"
+            spellcheck="true"
+            placeholder="Message"
+          ></textarea>
+          <div class="composer-tools">
+            <button type="button" id="attach" aria-label="Menu" aria-haspopup="dialog">+</button>
+            <div id="optbar" class="optbar" hidden></div>
+            <div class="actions">
+              <button type="submit" id="send">Send</button>
+            </div>
+          </div>
         </div>
         <input id="photos" type="file" accept="image/*" multiple hidden />
       </form>
       <button type="button" id="jump" hidden>Latest</button>
       <div id="sheet" hidden><div class="sheet-panel" role="dialog" aria-label="Menu"></div></div>
+      <div id="confirm" hidden><div class="confirm-panel" role="alertdialog" aria-modal="true"></div></div>
       <div id="viewer" hidden><img alt="Full size image" /></div>
     </div>
     <script type="module" src="/app.js"></script>

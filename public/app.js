@@ -2,6 +2,7 @@ import { renderMarkdown, setImageSession } from "./markdown.js";
 import { applyEvent } from "./reduce.js";
 import { copyText } from "./clipboard.js";
 import { composerAction, hasComposerContent } from "./composer.js";
+import { applyReasoning, longRunActive, modeChoice, reasoningChoice, reasoningChipText, ULTRA_HELP } from "./options.js";
 
 const EFFORTS = [
   ["high", "High"],
@@ -77,11 +78,13 @@ const app = {
   es: null,
   quietClose: false,
   sending: false,
-  draft: { cwd: "", model: "grok-4.7", effort: "high", permissionMode: "default", ultra: false },
+  draft: { cwd: "", model: "grok-4.7", effort: "high", permissionMode: "default", ultra: false, plan: false, longRun: false, longHours: 12 },
   images: [],
   imageRoute: "",
   queue: [],
   loops: [],
+  appearance: "dark",
+  appearanceRemote: false,
 };
 
 const main = document.getElementById("main");
@@ -104,6 +107,9 @@ function clearImages() {
 }
 
 function noteRoute(key) {
+  const view = String(key || "").split(":")[0] || "";
+  document.body.dataset.view = view;
+  if (view !== "chat") applyNeutralChrome();
   if (app.imageRoute === key) return;
   app.imageRoute = key;
   clearImages();
@@ -243,14 +249,52 @@ function renderShots(node, images) {
     img.src = src;
     row.append(img);
   }
-  if (row.childElementCount) node.append(row);
+  if (!row.childElementCount) return;
+  const copy = node.querySelector(":scope > .msg-actions") || node.querySelector(":scope > .msg-copy");
+  if (copy) node.insertBefore(row, copy);
+  else node.append(row);
+}
+
+// The shell is sized by CSS (--vv-height, 100dvh or 100vh) and JS does not touch it while the keyboard is closed.
+// Installed iOS leaves window.innerHeight and visualViewport.height short after the keyboard closes, and sizing the
+// shell from either painted that shortfall as a gap under the composer (found on a real iPhone, 12 Oct 2026). So the
+// reference for "full height" is a hidden 100vh element, which does not follow the keyboard, and the inline
+// variables below exist only while a text field has focus and the visual viewport is well short of that height.
+// On blur they are removed and the CSS takes over. The page never scrolls (html and body are overflow hidden, only
+// #main scrolls); iPhone scrolls the document when a field gets focus, so every viewport event and focus change puts
+// it back at 0. The bottom safe area is CSS padding on the shell, once, and is 0 while the keyboard covers it.
+const KEYBOARD_GAP = 140;
+const heightProbe = document.createElement("div");
+heightProbe.setAttribute("aria-hidden", "true");
+heightProbe.style.cssText = "position:absolute;left:0;top:0;width:0;height:100vh;visibility:hidden;pointer-events:none;";
+document.body.append(heightProbe);
+
+function typingInField() {
+  const el = document.activeElement;
+  return !!el && (el.tagName === "TEXTAREA" || el.tagName === "SELECT" || (el.tagName === "INPUT" && !/^(button|checkbox|radio|file|submit|range|color|image|reset)$/.test(el.type)) || el.isContentEditable);
+}
+
+function resetDocumentScroll() {
+  const doc = document.scrollingElement || document.documentElement;
+  if (window.scrollY || window.scrollX || doc.scrollTop || document.body.scrollTop) window.scrollTo(0, 0);
 }
 
 function applyViewport(vv) {
-  const topPx = vv && vv.offsetTop ? vv.offsetTop : 0;
-  const height = vv && vv.height ? vv.height : window.innerHeight;
-  document.documentElement.style.setProperty("--vv-top", topPx + "px");
-  document.documentElement.style.setProperty("--vv-height", height + "px");
+  const layout = Math.round(heightProbe.getBoundingClientRect().height) || window.innerHeight;
+  const vvHeight = vv && vv.height ? vv.height : layout;
+  const offsetTop = vv && vv.offsetTop > 0 ? vv.offsetTop : 0;
+  // Short by the keyboard whether iOS scrolled the page (offsetTop 0) or panned the viewport (offsetTop > 0).
+  const keyboard = typingInField() && layout - vvHeight > KEYBOARD_GAP;
+  const root = document.documentElement;
+  if (keyboard) {
+    root.style.setProperty("--vv-top", Math.round(offsetTop) + "px");
+    root.style.setProperty("--vv-height", Math.max(1, Math.round(offsetTop + vvHeight)) + "px");
+    root.style.setProperty("--vv-visible", Math.max(1, Math.round(vvHeight)) + "px");
+  } else {
+    for (const name of ["--vv-top", "--vv-height", "--vv-visible"]) root.style.removeProperty(name);
+  }
+  root.classList.toggle("keyboard", keyboard);
+  resetDocumentScroll();
 }
 
 function nearBottom() {
@@ -262,15 +306,56 @@ function scrollToEnd(behavior) {
 }
 
 function handleViewport() {
+  placePopover();
   const stick = app.stick || nearBottom();
-  const vv = window.visualViewport;
-  applyViewport(vv || { offsetTop: 0, height: window.innerHeight });
+  applyViewport(window.visualViewport || null);
+  paintDebug();
   if (stick) requestAnimationFrame(() => scrollToEnd("auto"));
+}
+
+// ?debug=vv: the numbers that decide the shell height, on screen, so a real iPhone can be screenshotted.
+const debugBox = new URLSearchParams(location.search).get("debug") === "vv" ? document.createElement("pre") : null;
+if (debugBox) {
+  debugBox.id = "vv-debug";
+  document.body.append(debugBox);
+  setInterval(() => paintDebug(), 500);
+}
+
+function paintDebug() {
+  if (!debugBox) return;
+  const vv = window.visualViewport;
+  const doc = document.scrollingElement || document.documentElement;
+  const shell = document.getElementById("app").getBoundingClientRect();
+  const composerBox = document.getElementById("composer").getBoundingClientRect();
+  const standalone = matchMedia("(display-mode: standalone)").matches || navigator.standalone === true;
+  const rows = [
+    ["innerHeight", window.innerHeight],
+    ["innerWidth", window.innerWidth],
+    ["100vh probe", Math.round(heightProbe.getBoundingClientRect().height)],
+    ["vv.height", vv ? Math.round(vv.height * 10) / 10 : "n/a"],
+    ["vv.offsetTop", vv ? Math.round(vv.offsetTop * 10) / 10 : "n/a"],
+    ["vv.pageTop", vv ? Math.round(vv.pageTop * 10) / 10 : "n/a"],
+    ["scrollY", Math.round(window.scrollY * 10) / 10],
+    ["doc.scrollTop", Math.round(doc.scrollTop)],
+    ["shell h", Math.round(shell.height * 10) / 10],
+    ["shell top", Math.round(shell.top * 10) / 10],
+    ["composer bottom", composerBox.height ? Math.round(composerBox.bottom * 10) / 10 : "hidden"],
+    ["--vv-height", document.documentElement.style.getPropertyValue("--vv-height") || "(css)"],
+    ["keyboard", document.documentElement.classList.contains("keyboard")],
+    ["focus", document.activeElement ? document.activeElement.tagName.toLowerCase() : "-"],
+    ["standalone", standalone],
+  ];
+  debugBox.textContent = rows.map(([k, v]) => k.padEnd(16) + v).join("\n");
 }
 
 window.__gm = { applyViewport, nearBottom, scrollToEnd, handleViewport };
 
 function growInput() {
+  const bar = input.closest(".composer-bar");
+  bar?.classList.remove("tall");
+  input.style.height = "auto";
+  const plain = input.scrollHeight;
+  bar?.classList.toggle("tall", plain > 56);
   input.style.height = "auto";
   input.style.height = Math.min(input.scrollHeight, 160) + "px";
   document.documentElement.style.setProperty("--composer-h", composer.offsetHeight + "px");
@@ -289,10 +374,18 @@ function setBanner(mode) {
 // The + button carries a small dot when something in the menu needs attention.
 function paintPlus() {
   const chat = route().name === "chat";
+  const desktopMenu = isDesktop() && chat;
   const waiting = chat && app.running && !!main.querySelector(".toolcard.asking");
   const auto = chat && activeAuto().length > 0;
-  attachBtn.classList.toggle("flag-wait", waiting);
-  attachBtn.classList.toggle("flag-auto", !waiting && (auto || (chat && app.bypass)));
+  const attention = auto || (chat && app.bypass);
+  attachBtn.classList.toggle("flag-wait", !desktopMenu && waiting);
+  attachBtn.classList.toggle("flag-auto", !desktopMenu && !waiting && attention);
+  attachBtn.setAttribute("aria-label", desktopMenu ? "Add photo" : "Menu");
+  const menu = document.querySelector(".side-menu");
+  if (menu) {
+    menu.classList.toggle("flag-wait", desktopMenu && waiting);
+    menu.classList.toggle("flag-auto", desktopMenu && !waiting && attention);
+  }
 }
 
 function activeAuto() {
@@ -417,10 +510,16 @@ setsheet.hidden = true;
 document.getElementById("app").append(setsheet);
 
 function closeSettings() {
-  if (setsheet.hidden) return;
-  setsheet.hidden = true;
-  const panel = setsheet.querySelector(".set-panel");
-  if (panel) panel.style.transform = "";
+  const restoreSession = !setsheet.hidden && !!setsheet.querySelector("[aria-label='App settings']") && route().name === "chat" && app.session;
+  if (!setsheet.hidden) {
+    setsheet.hidden = true;
+    const panel = setsheet.querySelector(".set-panel");
+    if (panel) panel.style.transform = "";
+  }
+  if (restoreSession) {
+    buildSettings(app.sessionId, app.session);
+    setsheet.hidden = true;
+  }
 }
 
 function openSettings() {
@@ -435,13 +534,48 @@ setsheet.addEventListener("click", (event) => {
   if (event.target === setsheet) closeSettings();
 });
 
+// A settings group: a small muted-caps label over a rounded card. The gap between cards is the only separator.
 function settingsGroup(title, ...nodes) {
   const sec = document.createElement("section");
   sec.className = "set-group";
   const h = document.createElement("h2");
   h.textContent = title;
-  sec.append(h, ...nodes.filter(Boolean));
+  const card = document.createElement("div");
+  card.className = "set-card";
+  card.append(...nodes.filter(Boolean));
+  sec.append(h, card);
   return sec;
+}
+
+// The sheet every settings screen shares: grip, title, Done. Returns the panel and the body to fill.
+function settingsSheet(title) {
+  const panel = document.createElement("div");
+  panel.className = "set-panel";
+  panel.setAttribute("role", "dialog");
+  panel.setAttribute("aria-label", title);
+  const head = document.createElement("div");
+  head.className = "set-head";
+  const grip = document.createElement("span");
+  grip.className = "grip";
+  const h = document.createElement("h2");
+  h.textContent = title;
+  const done = button("Done", () => closeSettings(), "set-done");
+  done.setAttribute("aria-label", "Close settings");
+  head.append(grip, h, done);
+  const body = document.createElement("div");
+  body.className = "set-body";
+  panel.append(head, body);
+  return { panel, head, body };
+}
+
+// The group label already says what a control is, so its own visible label becomes an aria-label.
+function bareField(field, label) {
+  if (!field) return field;
+  const text = [...field.childNodes].find((node) => node.nodeType === 3);
+  text?.remove();
+  const control = field.querySelector("select, input, textarea");
+  if (control && !control.getAttribute("aria-label")) control.setAttribute("aria-label", label || text?.textContent || "");
+  return field;
 }
 
 function buildSettings(id, session) {
@@ -454,37 +588,26 @@ function buildSettings(id, session) {
       headerForChat();
       paintAuto();
       paintAutoSettings();
+      paintOptbar();
     } catch (error) {
       if (!error.auth) setNotice(error.message);
     }
   };
-  const panel = document.createElement("div");
-  panel.className = "set-panel";
-  panel.setAttribute("role", "dialog");
-  panel.setAttribute("aria-label", "Session settings");
-  const head = document.createElement("div");
-  head.className = "set-head";
-  const grip = document.createElement("span");
-  grip.className = "grip";
-  const h = document.createElement("h2");
-  h.textContent = "Session settings";
-  const done = button("Done", () => closeSettings(), "set-done");
-  done.setAttribute("aria-label", "Close settings");
-  head.append(grip, h, done);
+  const { panel, head, body } = settingsSheet("Session settings");
   const name = document.createElement("input");
   name.id = "set-name";
   name.value = session.title || "";
   name.maxLength = 120;
+  name.setAttribute("aria-label", "Session name");
+  name.placeholder = "Name";
   name.addEventListener("change", () => {
     const title = name.value.trim();
     if (title) save({ title });
   });
-  const prefs = prefsBlock(session, (next) => save({ model: next.model, effort: next.effort, permissionMode: next.permissionMode, ultra: next.ultra, plan: next.plan }), { cwdEditable: false });
+  const prefs = prefsBlock(session, (next) => save({ model: next.model, permissionMode: next.permissionMode }), { cwdEditable: false });
   const fields = [...prefs.querySelectorAll(":scope > .field")];
-  const [dirField, modelField, effortField, permField] = fields;
+  const [dirField, modelField, , permField] = fields;
   const modeNote = prefs.querySelector(":scope > .mode-note");
-  const ultra = prefs.querySelector(":scope > .switch:not(.plan-switch)");
-  const planSw = prefs.querySelector(":scope > .plan-switch");
   const themeGrid = themePicker(session.theme || "", (theme) => save({ theme }), { allowDefault: true });
   themeGrid.id = "set-theme";
   const autoBox = document.createElement("div");
@@ -493,20 +616,16 @@ function buildSettings(id, session) {
   const usage = document.createElement("div");
   usage.className = "usage";
   usage.id = "usage";
-  const body = document.createElement("div");
-  body.className = "set-body";
   body.append(
-    field("Name", name),
+    settingsGroup("Name", name),
+    settingsGroup("Appearance", appearanceControl()),
     settingsGroup("Theme", themeGrid),
-    settingsGroup("Model and effort", modelField, effortField),
-    settingsGroup("Approvals", permField, modeNote, autoBox),
-    settingsGroup("Plan", planSw),
-    settingsGroup("Ultra", ultra),
+    settingsGroup("Model", bareField(modelField, "Model")),
+    settingsGroup("Approvals", bareField(permField, "Permission"), modeNote, autoBox),
     settingsGroup("Skeptical review", skepticSessionBlock(id, session)),
     settingsGroup("Usage", usage),
-    settingsGroup("Session", dirField, sessionActions(id))
+    settingsGroup("Directory", bareField(dirField, "Directory"))
   );
-  panel.append(head, body);
   setsheet.replaceChildren(panel);
   paintAutoSettings();
   // Swipe down from the top of the sheet to close it.
@@ -545,6 +664,7 @@ function openWatch(id) {
     if (app.sessionId !== id) return;
     if (msg.what === "loops") {
       app.loops = msg.loops || [];
+      paintOptbar();
     } else if (msg.what === "queue") {
       app.queue = msg.items || [];
       paintQueue();
@@ -586,15 +706,29 @@ function syncSettingsUi() {
     el.classList.toggle("on", el.dataset.id === (s.theme || ""));
     el.setAttribute("aria-checked", el.dataset.id === (s.theme || "") ? "true" : "false");
   }
-  const sels = setsheet.querySelectorAll("select");
-  const [model, effort, mode] = sels;
+  const sessionPanel = setsheet.querySelector("[aria-label='Session settings']");
+  const named = (label) => {
+    if (!sessionPanel) return null;
+    for (const sel of sessionPanel.querySelectorAll("select")) {
+      if (sel.closest(".field")?.firstChild?.textContent === label) return sel;
+    }
+    return null;
+  };
+  const model = named("Model");
+  const effort = named("Effort");
+  const mode = named("Permission");
+  const skepticMode = named("Skeptical review");
+  const skepticLoop = named("Auto-loop");
   if (model && s.model) model.value = s.model;
   if (effort && s.effort) effort.value = s.effort;
   if (mode && s.permissionMode) mode.value = s.permissionMode;
+  if (skepticMode && s.skeptic) skepticMode.value = s.skeptic;
+  if (skepticLoop && s.skepticLoop) skepticLoop.value = s.skepticLoop;
   const ultra = setsheet.querySelector(".switch:not(.plan-switch) input");
   if (ultra) ultra.checked = !!s.ultra;
   const planIn = setsheet.querySelector(".plan-switch input");
   if (planIn) planIn.checked = !!s.plan;
+  paintOptbar();
 }
 
 function closeStream() {
@@ -649,28 +783,101 @@ function applyTheme(theme) {
     const css = ":root{" + Object.entries(theme.vars).map(([key, value]) => key + ":" + value).join(";") + "}";
     if (style.textContent !== css) style.textContent = css;
   }
-  document.documentElement.style.colorScheme = theme.mode === "light" ? "light" : "dark";
   const meta = document.querySelector('meta[name="theme-color"]');
   if (meta && theme.vars && theme.vars["--bg-darker"]) meta.setAttribute("content", theme.vars["--bg-darker"]);
   app.themeName = theme.name || "";
-  app.themePref = theme.pref || "purple";
+  if (theme.pref) app.themePref = theme.pref;
 }
 
-// Themes: one global default plus an optional palette per session.
+// Same colors as neutralVars() in lib/theme.js. List, sidebar, and new-session chrome use these.
+function neutralVars(mode) {
+  if (mode === "light") {
+    return {
+      "--bg": "#ffffff",
+      "--bg-dark": "#ffffff",
+      "--bg-darker": "#ffffff",
+      "--bg-light": "#f2f2f2",
+      "--fg": "#000000",
+      "--fg-dim": "#5c636a",
+      "--fg-soft": "#5c636a",
+      "--fg-bright": "#000000",
+      "--accent": "#000000",
+      "--on-accent": "#ffffff",
+      "--line": "#e2e2e2",
+      "--muted": "#5c636a",
+      "--selection": "#e2e2e2",
+      "--banner-bg": "#f2f2f2",
+      "--banner-fg": "#000000",
+      "--red": "#c42b3a",
+      "--green": "#1a7f37",
+      "--yellow": "#9a6700",
+      "--orange": "#bc4c00",
+      "--blue": "#0969da",
+      "--cyan": "#1b7c83",
+    };
+  }
+  return {
+    "--bg": "#000000",
+    "--bg-dark": "#000000",
+    "--bg-darker": "#000000",
+    "--bg-light": "#16181c",
+    "--fg": "#ffffff",
+    "--fg-dim": "#8b9196",
+    "--fg-soft": "#8b9196",
+    "--fg-bright": "#ffffff",
+    "--accent": "#ffffff",
+    "--on-accent": "#000000",
+    "--line": "#2f3336",
+    "--muted": "#8b9196",
+    "--selection": "#2f3336",
+    "--banner-bg": "#16181c",
+    "--banner-fg": "#ffffff",
+    "--red": "#f7768e",
+    "--green": "#9ece6a",
+    "--yellow": "#e0af68",
+    "--orange": "#ff9e64",
+    "--blue": "#8cb4ff",
+    "--cyan": "#7dcfff",
+  };
+}
+
+function applyNeutralChrome() {
+  applyTheme({ vars: neutralVars(app.appearance === "light" ? "light" : "dark"), name: "", pref: "" });
+}
+
+// Themes color a session's header and accents. The list and the sidebar stay neutral.
 function themeById(id) {
   return (app.themes || []).find((theme) => theme.id === id) || null;
 }
 
 function sessionThemeId() {
-  const where = route().name;
-  if (where === "chat" && app.session && app.session.theme && themeById(app.session.theme)) return app.session.theme;
-  if (where === "new" && app.draft.theme && themeById(app.draft.theme)) return app.draft.theme;
+  if (route().name !== "chat") return "";
+  const id = app.session && app.session.theme;
+  if (id && themeById(id)) return id;
   return app.globalTheme || "purple";
 }
 
 function applyCurrentTheme() {
+  if (route().name !== "chat") {
+    applyNeutralChrome();
+    return;
+  }
   const theme = themeById(sessionThemeId());
   if (theme) applyTheme(theme);
+}
+
+function sessionAccent(themeId) {
+  const theme = themeById(themeId || app.globalTheme || "purple");
+  return theme && theme.vars ? theme.vars["--accent"] : "";
+}
+
+function paintSessionDots() {
+  for (const row of document.querySelectorAll(".row[data-theme], .side-row[data-theme], .switch-row[data-theme]")) {
+    const dot = row.querySelector(".row-dot, .side-dot");
+    const color = sessionAccent(row.dataset.theme);
+    if (dot && color) dot.style.background = color;
+    if (color && row.classList.contains("side-row")) row.style.setProperty("--row-accent", color);
+  }
 }
 
 // Picks a palette no other recent or running session is using, so sessions are easy to tell apart.
@@ -695,7 +902,7 @@ function themePicker(value, onPick, { allowDefault } = {}) {
   const options = [...(app.themes || [])];
   if (allowDefault) {
     const base = themeById(app.globalTheme || "purple");
-    if (base) options.unshift({ ...base, id: "", name: "App default" });
+    if (base) options.unshift({ ...base, id: "", name: "Default", label: "App default" });
   }
   const paint = (current) => {
     for (const el of grid.children) {
@@ -721,8 +928,14 @@ function themePicker(value, onPick, { allowDefault } = {}) {
     prev.innerHTML = '<i class="sw-bar"></i><i class="sw-them"></i><i class="sw-me"></i>';
     const name = document.createElement("span");
     name.className = "sw-name";
-    name.textContent = theme.id === "desktop" ? "Follow desktop" : theme.name;
-    el.append(prev, name);
+    name.textContent = theme.id === "desktop" ? "Desktop" : theme.name;
+    const foot = document.createElement("span");
+    foot.className = "sw-foot";
+    const check = lineIcon("check");
+    check.classList.add("sw-check");
+    foot.append(name, check);
+    el.append(prev, foot);
+    el.setAttribute("aria-label", theme.id === "desktop" ? "Follow desktop" : theme.label || theme.name);
     el.addEventListener("click", () => {
       paint(theme.id);
       onPick(theme.id);
@@ -733,20 +946,92 @@ function themePicker(value, onPick, { allowDefault } = {}) {
   return grid;
 }
 
-function themeField() {
-  const wrap = document.createElement("div");
-  wrap.className = "field";
-  wrap.append(document.createTextNode("Default theme"));
-  wrap.append(themePicker(app.globalTheme || "purple", async (id) => {
+const APPEARANCE_KEY = "gm-appearance";
+
+function storedAppearance() {
+  try {
+    const value = localStorage.getItem(APPEARANCE_KEY);
+    if (value === "light" || value === "dark") return value;
+  } catch {
+    // Private mode can throw. Dark stays the default.
+  }
+  return null;
+}
+
+function paintAppearance() {
+  const mode = app.appearance === "light" ? "light" : "dark";
+  for (const btn of document.querySelectorAll(".appearance-opt")) {
+    const on = btn.dataset.value === mode;
+    btn.classList.toggle("on", on);
+    btn.setAttribute("aria-checked", on ? "true" : "false");
+  }
+}
+
+function applyAppearance(mode) {
+  const next = mode === "light" ? "light" : "dark";
+  app.appearance = next;
+  document.documentElement.dataset.appearance = next;
+  paintAppearance();
+  applyCurrentTheme();
+}
+
+function chooseAppearance(mode) {
+  const next = mode === "light" ? "light" : "dark";
+  try {
+    localStorage.setItem(APPEARANCE_KEY, next);
+  } catch {
+    // Still apply it for this visit.
+  }
+  applyAppearance(next);
+  syncAppearance(next);
+}
+
+async function syncAppearance(next) {
+  if (!app.authed || !app.appearanceRemote || !app.globalTheme) return;
+  try {
+    await api("/api/theme", {
+      method: "POST",
+      body: JSON.stringify({ appearance: next, pref: app.globalTheme }),
+    });
+  } catch {
+    // The running server may not store appearance yet. localStorage already has it.
+  }
+}
+
+function appearanceControl() {
+  const group = document.createElement("div");
+  group.className = "appearance";
+  group.setAttribute("role", "radiogroup");
+  group.setAttribute("aria-label", "Appearance");
+  const mode = app.appearance === "light" ? "light" : "dark";
+  for (const [value, label] of [["dark", "Dark"], ["light", "Light"]]) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "appearance-opt" + (value === mode ? " on" : "");
+    btn.dataset.value = value;
+    btn.setAttribute("role", "radio");
+    btn.setAttribute("aria-checked", value === mode ? "true" : "false");
+    btn.append(lineIcon(value === "dark" ? "moon" : "sun"), document.createTextNode(label));
+    btn.addEventListener("click", () => chooseAppearance(value));
+    group.append(btn);
+  }
+  return group;
+}
+
+function themeGroup() {
+  const hint = document.createElement("p");
+  hint.className = "field-hint";
+  hint.textContent = "The list stays black or white. Sessions set to Default use this palette.";
+  return settingsGroup("Default session theme", hint, themePicker(app.globalTheme || "purple", async (id) => {
     try {
       await api("/api/theme", { method: "POST", body: JSON.stringify({ pref: id }) });
       app.globalTheme = id;
       applyCurrentTheme();
+      paintSessionDots();
     } catch (error) {
       if (!error.auth) setNotice(error.message);
     }
   }));
-  return wrap;
 }
 
 async function refreshTheme() {
@@ -756,10 +1041,25 @@ async function refreshTheme() {
       app.themes = data.themes;
       app.globalTheme = data.global || "purple";
       if (data.httpsUrl) app.httpsUrl = data.httpsUrl;
+      if (data.appearance === "light" || data.appearance === "dark") {
+        app.appearanceRemote = true;
+        const local = storedAppearance();
+        if (local && local !== data.appearance) syncAppearance(local);
+        else if (!local) {
+          try { localStorage.setItem(APPEARANCE_KEY, data.appearance); } catch { /* keep the visit */ }
+          applyAppearance(data.appearance);
+        }
+      }
       applyCurrentTheme();
+      paintSessionDots();
       return;
     }
-    applyTheme(await fetch("/api/theme").then((res) => res.json()));
+    const theme = await fetch("/api/theme").then((res) => (res.ok ? res.json() : null));
+    if (theme && theme.id) {
+      app.themes = [theme];
+      app.globalTheme = theme.pref || theme.id;
+    }
+    applyCurrentTheme();
   } catch {
     // Keep the last palette.
   }
@@ -871,6 +1171,7 @@ function groupNode(id) {
   count.className = "steps-count";
   const chev = document.createElement("span");
   chev.className = "chev";
+  chev.append(lineIcon("chevron"));
   summary.append(count, chev);
   const body = document.createElement("div");
   body.className = "steps-body";
@@ -917,6 +1218,7 @@ function createSubagent(message, key) {
   const chev = document.createElement("span");
   chev.className = "chev";
   chev.setAttribute("aria-hidden", "true");
+  chev.append(lineIcon("chevron"));
   head.append(name, status, chev);
   const meta = document.createElement("div");
   meta.className = "sub-meta";
@@ -959,7 +1261,7 @@ function paintSubagent(node, message, keep) {
   const tier = subTier(sub.agentType, sub.name);
   node.dataset.tier = tier;
   bits.push(tier === "ultra" ? "Ultra tier" : tier === "strong" ? "Strong tier" : "Default tier");
-  if (sub.agentType && sub.agentType !== "general-purpose") bits.push(sub.agentType.replace(/^grok-mobile-ultra:/, ""));
+  if (sub.agentType && sub.agentType !== "general-purpose") bits.push(sub.agentType.replace(/^grok-deck-ultra:/, ""));
   const tokens = tokensText(sub.tokens || sub.liveTokens);
   if (tokens) bits.push(tokens);
   if (status === "running") {
@@ -1195,7 +1497,36 @@ setInterval(() => {
 }, 100);
 
 
+function svgEl(name, attrs) {
+  const el = document.createElementNS("http://www.w3.org/2000/svg", name);
+  for (const [key, value] of Object.entries(attrs)) el.setAttribute(key, value);
+  return el;
+}
+
+function copyIcons() {
+  const copy = svgEl("svg", { viewBox: "0 0 18 18", class: "ico ico-copy" });
+  copy.append(
+    svgEl("rect", { x: "6.25", y: "2.25", width: "9.5", height: "9.5", rx: "1.5" }),
+    svgEl("rect", { x: "2.25", y: "6.25", width: "9.5", height: "9.5", rx: "1.5" }),
+  );
+  const check = svgEl("svg", { viewBox: "0 0 18 18", class: "ico ico-check" });
+  check.append(svgEl("path", { d: "M4 9.5 7.5 13 14 5.5" }));
+  for (const icon of [copy, check]) icon.setAttribute("aria-hidden", "true");
+  return [copy, check];
+}
+
 function flashCopied(btn) {
+  if (btn.querySelector(".ico-copy")) {
+    const rest = btn.classList.contains("msg-copy") ? "Copy message" : "Copy code";
+    btn.classList.add("copied");
+    btn.setAttribute("aria-label", "Copied");
+    clearTimeout(btn._flash);
+    btn._flash = setTimeout(() => {
+      btn.classList.remove("copied");
+      btn.setAttribute("aria-label", rest);
+    }, 1200);
+    return;
+  }
   const prev = btn.dataset.label || btn.textContent;
   btn.dataset.label = prev;
   btn.textContent = "Copied";
@@ -1211,8 +1542,15 @@ async function copyMessageText(node, btn) {
   const text = node._raw ?? "";
   const ok = await copyText(text);
   if (btn) {
-    flashCopied(btn);
-    if (!ok) btn.textContent = "Copy failed";
+    if (ok) flashCopied(btn);
+    else if (btn.classList.contains("msg-copy")) {
+      btn.setAttribute("aria-label", "Copy failed");
+      clearTimeout(btn._flash);
+      btn._flash = setTimeout(() => btn.setAttribute("aria-label", "Copy message"), 1200);
+    } else {
+      flashCopied(btn);
+      btn.textContent = "Copy failed";
+    }
   } else if (ok) {
     node.classList.add("just-copied");
     clearTimeout(node._copyFlash);
@@ -1222,17 +1560,20 @@ async function copyMessageText(node, btn) {
 }
 
 function addMsgCopy(node) {
+  const row = document.createElement("div");
+  row.className = "msg-actions";
   const btn = document.createElement("button");
   btn.type = "button";
   btn.className = "msg-copy";
-  btn.textContent = "Copy";
   btn.setAttribute("aria-label", "Copy message");
+  btn.append(...copyIcons());
   btn.addEventListener("click", (event) => {
     event.preventDefault();
     event.stopPropagation();
     copyMessageText(node, btn);
   });
-  node.append(btn);
+  row.append(btn);
+  node.append(row);
   let timer = 0;
   node.addEventListener("touchstart", (event) => {
     if (event.target.closest("button, a, .copy, .msg-copy")) return;
@@ -1240,7 +1581,7 @@ function addMsgCopy(node) {
     timer = setTimeout(() => {
       timer = 0;
       if (navigator.vibrate) navigator.vibrate(20);
-      copyMessageText(node, null);
+      copyMessageText(node, btn);
     }, 500);
   }, { passive: true });
   const cancel = () => { clearTimeout(timer); timer = 0; };
@@ -1292,13 +1633,14 @@ function createMessage(message) {
     name.className = "tool-name";
     const status = document.createElement("span");
     status.className = "tool-status";
+    const line = document.createElement("span");
+    line.className = "tool-line";
     const chev = document.createElement("span");
     chev.className = "chev";
     chev.setAttribute("aria-hidden", "true");
-    head.append(name, status, chev);
-    const line = document.createElement("div");
-    line.className = "tool-line";
-    summary.append(head, line);
+    chev.append(lineIcon("chevron"));
+    head.append(status, name, line, chev);
+    summary.append(head);
     const body = document.createElement("div");
     body.className = "tool-body";
     details.append(summary, body);
@@ -1326,6 +1668,17 @@ function createMessage(message) {
   node.dataset.mid = message.id;
   updateMessage(node, message);
   return node;
+}
+
+const STATUS_ICON = { completed: "check", failed: "x", denied: "x", in_progress: "progress", pending: "progress", waiting: "clock", cancelled: "minus" };
+
+// A step's status is an icon in its row; the words are its accessible name and the tooltip.
+function paintToolStatus(pill, status, text) {
+  pill.dataset.s = status;
+  pill.title = text;
+  pill.setAttribute("role", "img");
+  pill.setAttribute("aria-label", text);
+  pill.replaceChildren(lineIcon(STATUS_ICON[status] || "minus"));
 }
 
 function toolStatus(status) {
@@ -1369,9 +1722,10 @@ function renderTool(node, tool) {
   const pill = node.querySelector(".tool-status");
   let pillText = toolStatus(status);
   if (tool.permission === "auto" && status !== "denied") pillText += " · auto";
-  pill.textContent = pillText;
-  pill.dataset.s = status;
-  node.querySelector(".tool-line").textContent = oneLine(tool);
+  paintToolStatus(pill, status, pillText);
+  const doing = oneLine(tool);
+  // The line says what the step did; when it only repeats the name, it says nothing.
+  node.querySelector(".tool-line").textContent = doing.toLowerCase() === toolLabel(tool).toLowerCase() ? "" : doing;
   const body = node.querySelector(".tool-body");
   body.replaceChildren();
   if (tool.input) body.append(codeBlock(tool.kind === "execute" || tool.name === "run_terminal_command" ? "Command" : "Input", tool.input));
@@ -1393,14 +1747,17 @@ function renderTool(node, tool) {
 
 function renderPermission(node, tool) {
   const perm = node.querySelector(".perm");
+  const details = node.querySelector(":scope > details");
   const waiting = tool.waiting;
   if (!waiting) {
     perm.hidden = true;
     perm.replaceChildren();
+    if (details) details.hidden = false;
     node.classList.remove("asking");
     return;
   }
   node.classList.add("asking");
+  if (details) details.hidden = !(tool.images && tool.images.length);
   perm.hidden = false;
   perm.replaceChildren();
   const title = document.createElement("div");
@@ -1543,6 +1900,7 @@ function onStreamEvent(ev) {
   if (ev.type === "settled") {
     app.justDone = app.streamState.stopReason === "end_turn";
     setRunning(false);
+    notePlanUsageStale();
     reloadSettled();
     return;
   }
@@ -1730,7 +2088,7 @@ function openPicker(start, onSelect) {
   load(start || app.defaultDir || app.home);
 }
 
-function prefsBlock(prefs, onChange, { cwdEditable }) {
+function prefsBlock(prefs, onChange, { cwdEditable, onlyDirectory = false }) {
   const box = document.createElement("div");
   const cwd = document.createElement("input");
   cwd.value = prefs.cwd || "";
@@ -1749,7 +2107,11 @@ function prefsBlock(prefs, onChange, { cwdEditable }) {
   ultra.type = "checkbox";
   ultra.checked = !!prefs.ultra;
   const ultraText = document.createElement("span");
-  ultraText.innerHTML = "<b>Ultra code</b><small>Routes work through pstack's poteto-mode: plan, build, verify, review, unslop. Uses Extra high effort and keeps going until done. Slower and costs more.</small>";
+  const ultraName = document.createElement("b");
+  ultraName.textContent = "Ultra code";
+  const ultraHelp = document.createElement("small");
+  ultraHelp.textContent = ULTRA_HELP;
+  ultraText.append(ultraName, ultraHelp);
   ultraWrap.append(ultra, ultraText);
   const planWrap = document.createElement("label");
   planWrap.className = "switch plan-switch";
@@ -1782,7 +2144,9 @@ function prefsBlock(prefs, onChange, { cwdEditable }) {
     note.classList.toggle("warn", mode.value === "bypassPermissions");
   };
   paintNote();
-  const emit = () => {
+  const emit = (event) => {
+    if (event?.target === ultra && ultra.checked) effort.value = "xhigh";
+    if (event?.target === effort && effort.value !== "xhigh") ultra.checked = false;
     onChange({
       cwd: cwd.value.trim(),
       model: model.value,
@@ -1793,6 +2157,7 @@ function prefsBlock(prefs, onChange, { cwdEditable }) {
       longRun: longBox.checked,
       longHours: Number(longHours.value) || 12,
     });
+    if (onlyDirectory) return;
     paintNote();
     setBanner(mode.value);
   };
@@ -1808,20 +2173,27 @@ function prefsBlock(prefs, onChange, { cwdEditable }) {
     browse.setAttribute("aria-label", "Browse folders");
     row.append(cwd, browse);
     box.append(field("Directory", row));
-  } else box.append(field("Directory", cwd));
+  } else {
+    cwd.readOnly = true;
+    cwd.setAttribute("aria-readonly", "true");
+    box.append(field("Directory", cwd));
+  }
   if (cwdEditable && app.dirs.length) {
     const chips = document.createElement("div");
     chips.className = "chips";
     for (const dir of app.dirs) {
       const chip = button(shortPath(dir), () => {
         cwd.value = dir;
+        for (const other of chips.querySelectorAll("button")) other.classList.toggle("on", other === chip);
         emit();
       });
       chip.title = dir;
+      if (cwd.value === dir) chip.classList.add("on");
       chips.append(chip);
     }
     box.append(chips);
   }
+  if (onlyDirectory) return box;
   box.append(field("Model", model), field("Effort", effort), field("Permission", mode), note, planWrap, ultraWrap);
   if (cwdEditable) {
     const hoursRow = document.createElement("div");
@@ -1834,6 +2206,178 @@ function prefsBlock(prefs, onChange, { cwdEditable }) {
   apply.textContent = "Changes apply from the next message.";
   box.append(apply);
   return box;
+}
+
+const PLAN_MS = 5 * 60 * 1000;
+let planSnap = null;
+let planAt = 0;
+let planGen = 0;
+let planFlight = null;
+let planFlightGen = -1;
+
+function planUsageNode() {
+  const box = document.createElement("div");
+  box.className = "plan-usage";
+  box.hidden = true;
+  const name = document.createElement("span");
+  name.className = "plan-usage-label";
+  const track = document.createElement("div");
+  track.className = "plan-usage-track";
+  track.setAttribute("role", "progressbar");
+  track.setAttribute("aria-valuemin", "0");
+  track.setAttribute("aria-valuemax", "100");
+  const fill = document.createElement("div");
+  fill.className = "plan-usage-fill";
+  track.append(fill);
+  box.append(name, track);
+  return box;
+}
+
+function fillPlanUsage(box, data) {
+  const percent = Number(data && data.percent);
+  const label = data && typeof data.label === "string" ? data.label : "";
+  if (!data || data.available !== true || !Number.isFinite(percent) || !label) {
+    box.hidden = true;
+    return;
+  }
+  box.hidden = false;
+  const name = box.querySelector(".plan-usage-label");
+  if (name.textContent !== label) name.textContent = label;
+  const fill = box.querySelector(".plan-usage-fill");
+  fill.style.width = Math.max(0, Math.min(100, percent)) + "%";
+  const track = box.querySelector(".plan-usage-track");
+  track.setAttribute("aria-valuenow", String(Math.round(Math.max(0, Math.min(100, percent)))));
+  track.setAttribute("aria-label", label);
+}
+
+function loadPlanUsage(force) {
+  const gen = planGen;
+  if (!force && planSnap && Date.now() - planAt < PLAN_MS) return Promise.resolve(planSnap);
+  if (planFlight && planFlightGen === gen && !force) return planFlight;
+  planFlightGen = gen;
+  planFlight = api("/api/account")
+    .then((data) => {
+      if (gen !== planGen) return loadPlanUsage(true);
+      planSnap = data;
+      planAt = Date.now();
+      return data;
+    })
+    .catch(() => {
+      if (gen !== planGen) return loadPlanUsage(true);
+      planSnap = { available: false };
+      planAt = Date.now();
+      return planSnap;
+    })
+    .finally(() => {
+      if (planFlightGen === gen) planFlight = null;
+    });
+  return planFlight;
+}
+
+function mountPlanUsage(parent) {
+  const box = planUsageNode();
+  parent.append(box);
+  if (planSnap) fillPlanUsage(box, planSnap);
+  if (!planSnap || Date.now() - planAt >= PLAN_MS) {
+    loadPlanUsage(false).then((data) => {
+      if (box.isConnected) fillPlanUsage(box, data);
+    });
+  }
+  return box;
+}
+
+function notePlanUsageStale() {
+  planGen += 1;
+  planAt = 0;
+  if (!document.querySelector(".plan-usage")) return;
+  loadPlanUsage(true).then((data) => {
+    for (const box of document.querySelectorAll(".plan-usage")) fillPlanUsage(box, data);
+  });
+}
+
+function sameDay(iso) {
+  const then = Date.parse(iso || "");
+  if (!Number.isFinite(then)) return false;
+  const day = new Date(then);
+  const now = new Date();
+  return day.getFullYear() === now.getFullYear() && day.getMonth() === now.getMonth() && day.getDate() === now.getDate();
+}
+
+function sessionStatusText(session) {
+  if (session.waiting) return "Needs approval";
+  if (session.running) return "Running";
+  return "Idle";
+}
+
+function sessionSnippetText(session) {
+  const text = String(session.snippet || "").replace(/\s+/g, " ").trim();
+  return text || "No messages yet";
+}
+
+function sessionGroups(rows) {
+  const today = [];
+  const earlier = [];
+  for (const session of rows) (sameDay(session.updatedAt) ? today : earlier).push(session);
+  return [["Today", today], ["Earlier", earlier]].filter((pair) => pair[1].length);
+}
+
+function sessionMatches(session, query) {
+  if (!query) return true;
+  return (session.title + " " + (session.snippet || "") + " " + session.cwd).toLowerCase().includes(query);
+}
+
+function listEmpty(kind) {
+  const box = document.createElement("div");
+  box.className = "list-empty";
+  const title = document.createElement("p");
+  title.className = "list-empty-title";
+  const sub = document.createElement("p");
+  sub.className = "list-empty-sub";
+  if (kind === "archived") {
+    title.textContent = "No archived sessions";
+    sub.textContent = "Sessions you archive will show up here.";
+  } else if (kind === "search") {
+    title.textContent = "No matches";
+    sub.textContent = "Try a different search.";
+  } else {
+    title.textContent = "No sessions yet";
+    sub.textContent = "Start one and the latest message will show up here.";
+  }
+  box.append(title, sub);
+  return box;
+}
+
+// Swipe left on a phone row to reveal Delete. The row scrolls sideways inside its own box, so Delete sits beside it in
+// flow and nothing overlaps. Only one row stays open, and a tap anywhere else closes it.
+function closeSwipe(swipe) {
+  swipe.scrollTo({ left: 0, behavior: "smooth" });
+}
+
+function closeOtherSwipes(keep) {
+  for (const swipe of document.querySelectorAll(".row-wrap")) if (swipe !== keep && swipe.scrollLeft > 0) closeSwipe(swipe);
+}
+
+document.addEventListener("pointerdown", (event) => {
+  for (const swipe of document.querySelectorAll(".row-wrap")) if (swipe.scrollLeft > 8 && !swipe.contains(event.target)) closeSwipe(swipe);
+});
+
+function sessionMain(session, prefix) {
+  const main = document.createElement("span");
+  main.className = prefix + "-main";
+  const title = document.createElement("span");
+  title.className = prefix === "side" ? "side-title" : "row-title";
+  title.textContent = session.title || "New session";
+  const time = document.createElement("span");
+  time.className = prefix + "-time";
+  time.textContent = relTime(session.updatedAt);
+  const snippet = document.createElement("span");
+  snippet.className = prefix + "-snippet";
+  snippet.textContent = sessionSnippetText(session);
+  const status = document.createElement("span");
+  status.className = prefix + "-status" + (session.waiting ? " wait" : "") + (session.running ? " run" : "");
+  status.textContent = sessionStatusText(session);
+  main.append(title, time, snippet, status);
+  return main;
 }
 
 async function renderList(token) {
@@ -1854,8 +2398,22 @@ async function renderList(token) {
   paintQueue();
   paintAuto();
   paintWaiting();
-  header("Sessions", {});
+  header("Sessions", isDesktop() ? {} : { right: [appSettingsButton()] });
+  paintChatStatus();
   applyCurrentTheme();
+  if (isDesktop()) {
+    main.replaceChildren();
+    const screen = document.createElement("section");
+    screen.className = "screen home-empty";
+    const title = document.createElement("h2");
+    title.textContent = "Grok Deck";
+    const sub = document.createElement("p");
+    sub.className = "sub";
+    sub.textContent = "Choose a session, or start a new one.";
+    screen.append(title, sub);
+    main.append(screen);
+    return;
+  }
   main.replaceChildren();
   const loading = document.createElement("p");
   loading.className = "hint";
@@ -1874,75 +2432,59 @@ async function renderList(token) {
   app.sessions = data.sessions || [];
   main.replaceChildren();
   const wrap = document.createElement("div");
-  wrap.className = "screen";
+  wrap.className = "screen list-screen";
   let showArchived = false;
-  const fresh = button("New session", () => go("/new"), "primary wide");
-  wrap.append(fresh);
+  const tools = document.createElement("div");
+  tools.className = "list-tools";
+  const fresh = button("New session", () => go("/new"), "list-new primary");
+  fresh.setAttribute("aria-label", "New session");
   const filter = document.createElement("input");
-  filter.className = "filter";
-  filter.placeholder = "Filter";
-  filter.setAttribute("aria-label", "Filter sessions");
-  wrap.append(filter);
+  filter.className = "filter list-search";
+  filter.placeholder = "Search";
+  filter.setAttribute("aria-label", "Search sessions");
+  tools.append(filter, fresh);
   const list = document.createElement("div");
+  list.className = "list-body";
   const draw = () => {
     list.replaceChildren();
     const query = filter.value.trim().toLowerCase();
     const all = data.sessions || [];
-    const rows = all.filter((session) => {
-      if (!!session.archived !== showArchived) return false;
-      if (!query) return true;
-      return (session.title + " " + session.cwd + " " + session.model).toLowerCase().includes(query);
-    });
+    const rows = all.filter((session) => !!session.archived === showArchived && sessionMatches(session, query));
     if (!rows.length) {
-      const empty = document.createElement("p");
-      empty.className = "hint";
-      empty.textContent = showArchived ? "No archived sessions." : all.length ? "No matches." : "No sessions yet.";
-      list.append(empty);
+      list.append(listEmpty(showArchived ? "archived" : query ? "search" : "none"));
       list.append(archToggle(all));
       return;
     }
-    for (const session of rows) {
-      const row = document.createElement("button");
-      row.type = "button";
-      row.className = "row";
-      const swatch = themeById(session.theme || app.globalTheme || "purple");
-      if (swatch) row.style.setProperty("--row-accent", swatch.vars["--accent"]);
-      const title = document.createElement("span");
-      title.className = "row-title";
-      title.textContent = session.title || "New session";
-      const meta = document.createElement("span");
-      meta.className = "row-meta";
-      meta.textContent = [shortPath(session.cwd), relTime(session.updatedAt), session.model].filter(Boolean).join(" · ");
-      row.append(title, meta);
-      const badges = document.createElement("span");
-      badges.className = "badges";
-      if (session.running) {
-        const badge = document.createElement("span");
-        badge.className = "badge run";
-        badge.textContent = "Running";
-        badges.append(badge);
+    for (const [label, items] of sessionGroups(rows)) {
+      const heading = document.createElement("h3");
+      heading.className = "list-group";
+      heading.textContent = label;
+      list.append(heading);
+      for (const session of items) {
+        const swipe = document.createElement("div");
+        swipe.className = "row-wrap";
+        const row = document.createElement("button");
+        row.type = "button";
+        row.className = "row";
+        row.dataset.theme = session.theme || "";
+        const dot = document.createElement("i");
+        dot.className = "row-dot";
+        dot.setAttribute("aria-hidden", "true");
+        const accent = sessionAccent(session.theme);
+        if (accent) dot.style.background = accent;
+        row.append(dot, sessionMain(session, "row"));
+        row.addEventListener("click", () => {
+          if (swipe.scrollLeft > 8) closeSwipe(swipe);
+          else go("/s/" + session.id);
+        });
+        const remove = button("Delete", () => askDeleteSession(session), "row-delete");
+        remove.setAttribute("aria-label", "Delete " + (session.title || "New session"));
+        swipe.append(row, remove);
+        swipe.addEventListener("scroll", () => {
+          if (swipe.scrollLeft > 8) closeOtherSwipes(swipe);
+        }, { passive: true });
+        list.append(swipe);
       }
-      if (session.waiting) {
-        const badge = document.createElement("span");
-        badge.className = "badge wait";
-        badge.textContent = "Needs approval";
-        badges.append(badge);
-      }
-      if (session.ultra) {
-        const badge = document.createElement("span");
-        badge.className = "badge ultra";
-        badge.textContent = "Ultra";
-        badges.append(badge);
-      }
-      if (badges.childElementCount) row.append(badges);
-      if (session.permissionMode === "bypassPermissions") {
-        const badge = document.createElement("span");
-        badge.className = "badge";
-        badge.textContent = "Always approve";
-        row.append(badge);
-      }
-      row.addEventListener("click", () => go("/s/" + session.id));
-      list.append(row);
     }
     list.append(archToggle(all));
   };
@@ -1956,13 +2498,10 @@ async function renderList(token) {
   };
   filter.addEventListener("input", draw);
   draw();
-  wrap.append(list);
-  const appSettings = document.createElement("details");
-  appSettings.className = "step settings app-settings";
-  const appSum = document.createElement("summary");
-  appSum.textContent = "App settings";
-  appSettings.append(appSum, themeField(), skepticDefaultsBlock(), notifyBlock(), button("Log out", logout, "wide"));
-  wrap.append(appSettings);
+  const foot = document.createElement("footer");
+  foot.className = "list-foot";
+  mountPlanUsage(foot);
+  wrap.append(tools, list, foot);
   main.append(wrap);
 }
 
@@ -1986,6 +2525,7 @@ async function renderNew(token) {
   paintWaiting();
   header("New session", isDesktop() ? {} : { left: [backButton()] });
   planBadge();
+  paintPlus();
   try {
     await loadDirs();
   } catch (error) {
@@ -2003,38 +2543,46 @@ async function renderNew(token) {
   intro.className = "sub";
   intro.textContent = "Send a message to start. Grok asks before running commands or editing files.";
   screen.append(intro);
-  screen.append(
-    prefsBlock(app.draft, (next) => {
-      app.draft = { ...next, theme: app.draft.theme };
-      headerNewBadge();
-    }, { cwdEditable: true })
-  );
-  const themeWrap = document.createElement("div");
-  themeWrap.className = "field";
-  themeWrap.append(document.createTextNode("Theme"));
-  themeWrap.append(themePicker(app.draft.theme, (id) => {
-    app.draft.theme = id;
-    applyCurrentTheme();
-  }));
-  screen.append(themeWrap);
+  screen.append(prefsBlock(app.draft, (next) => {
+    app.draft.cwd = next.cwd;
+  }, { cwdEditable: true, onlyDirectory: true }));
   main.append(screen);
   setBanner(app.draft.permissionMode);
+  paintOptbar();
   growInput();
   input.focus();
 }
 
 function headerForChat() {
   const title = (app.session && app.session.title) || "New session";
-  // Desktop already has the sessions sidebar, so skip the back arrow there.
+  // Desktop chat has no top bar. The name is the sidebar row. Plan and context sit by the composer.
+  if (isDesktop() && route().name === "chat") {
+    top.replaceChildren();
+    paintChatStatus();
+    if (app.sessionId) paintContext(app.sessionId);
+    paintPlus();
+    return;
+  }
   header(title, isDesktop() ? {} : { left: [backButton()] });
   planBadge();
   if (app.sessionId) paintContext(app.sessionId);
+  paintPlus();
+}
+
+function paintChatStatus() {
+  const box = document.getElementById("chat-meta");
+  if (!box) return;
+  const pill = box.querySelector(".ctx");
+  const show = isDesktop() && route().name === "chat";
+  box.replaceChildren();
+  if (show && pill) box.append(pill);
+  box.hidden = !show || box.childElementCount === 0;
 }
 
 function subTier(type, name) {
   const t = String(type || "");
   const n = String(name || "");
-  if (/(^|:)ultra-|^grok-mobile-ultra:/.test(t) || /^ultra\b/i.test(n)) return "ultra";
+  if (/(^|:)ultra-|^grok-deck-ultra:/.test(t) || /^ultra\b/i.test(n)) return "ultra";
   if (/(^|:)strong$/.test(t) || /^strong\b/i.test(n)) return "strong";
   return "default";
 }
@@ -2056,23 +2604,30 @@ async function paintContext(id) {
   try {
     const u = await api("/api/sessions/" + id + "/usage");
     if (app.sessionId !== id || !u.context) return;
+    const pill = contextPill(u.context);
+    if (isDesktop() && route().name === "chat") {
+      const box = document.getElementById("chat-meta");
+      if (!box) return;
+      box.querySelector(".ctx")?.remove();
+      box.hidden = false;
+      box.append(pill);
+      return;
+    }
     top.querySelector(".ctx")?.remove();
-    top.querySelector("h1")?.after(contextPill(u.context));
+    top.querySelector("h1")?.after(pill);
   } catch {
-    // Header pill is optional.
+    // The meter is optional.
   }
 }
 
 function planBadge() {
-  if (!planOn()) return;
-  const badge = document.createElement("span");
-  badge.className = "badge plan";
-  badge.textContent = "Plan";
-  top.querySelector("h1")?.after(badge);
+  top.querySelector(".badge.plan")?.remove();
+  paintChatStatus();
 }
 
 function backButton() {
-  const el = button("‹", () => go("/"), "back");
+  const el = button("", () => go("/"), "back");
+  el.append(lineIcon("back"));
   el.setAttribute("aria-label", "Back to sessions");
   return el;
 }
@@ -2081,6 +2636,11 @@ async function renderChat(token, id) {
   paintLongRun(null);
   if (app.sessionId !== id) app.justDone = false;
   noteRoute("chat:" + id);
+  const chatMeta = document.getElementById("chat-meta");
+  if (chatMeta) {
+    chatMeta.hidden = true;
+    chatMeta.replaceChildren();
+  }
   closeStream();
   app.sessionId = id;
   setImageSession(id);
@@ -2120,6 +2680,7 @@ async function renderChat(token, id) {
   setMessages(data.messages || []);
   paintWaiting();
   if (data.running) connectStream(data.cursor || 0);
+  paintOptbar();
   growInput();
 }
 
@@ -2321,6 +2882,7 @@ function paintPlanCard(node, message) {
       if (decision === "approve" && app.session) {
         app.session.plan = false;
         headerForChat();
+        paintOptbar();
       }
       if (decision === "revise") {
         input.focus();
@@ -2353,7 +2915,8 @@ function paintPlanCard(node, message) {
 async function setPlan(on) {
   if (route().name !== "chat") {
     app.draft.plan = on;
-    renderRoute();
+    headerNewBadge();
+    paintOptbar();
     return;
   }
   try {
@@ -2372,6 +2935,336 @@ function headerNewBadge() {
 
 function planOn() {
   return route().name === "chat" ? !!app.session?.plan : !!app.draft.plan;
+}
+
+function currentModeState() {
+  if (route().name === "chat") return { plan: !!app.session?.plan, longRun: app.longRun, loops: app.loops || [] };
+  return { plan: !!app.draft.plan, longRun: !!app.draft.longRun, loops: [] };
+}
+
+function currentReasoningState() {
+  const src = route().name === "chat" ? (app.session || {}) : app.draft;
+  return { effort: src.effort, ultra: !!src.ultra, model: src.model };
+}
+
+// One icon set: 18px grid, 1.5px round stroke, drawn in currentColor. Every icon in the app comes from here.
+function gearPath() {
+  const points = [];
+  for (let i = 0; i < 8; i++) {
+    const centre = (i * 45 * Math.PI) / 180;
+    for (const [turn, radius] of [[-13, 5.3], [-8, 7.4], [8, 7.4], [13, 5.3]]) {
+      const angle = centre + (turn * Math.PI) / 180;
+      points.push((9 + radius * Math.cos(angle)).toFixed(2) + " " + (9 + radius * Math.sin(angle)).toFixed(2));
+    }
+  }
+  return "M" + points.join("L") + "Z";
+}
+
+const ICON_PATHS = {
+  cog: [gearPath(), "M11.3 9a2.3 2.3 0 1 1-4.6 0 2.3 2.3 0 0 1 4.6 0Z"],
+  trash: ["M3 5h12", "M7 5V3.5h4V5", "M4.5 5l.7 9.5h7.6l.7-9.5", "M7.5 8v4.5", "M10.5 8v4.5"],
+  check: ["M4 9.5 7.5 13 14 5.5"],
+  back: ["M10.5 4.5 6 9l4.5 4.5"],
+  photo: ["M4.5 3.5h9a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1h-9a1 1 0 0 1-1-1v-9a1 1 0 0 1 1-1Z", "M3.5 12.5 7 9l3 3 2-2 2.5 2.5", "M11.75 7a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0Z"],
+  archive: ["M3 4.5h12v3H3Z", "M4 7.5V14h10V7.5", "M7.5 10.5h3"],
+  bell: ["M9 2.5a4 4 0 0 0-4 4V10l-1.5 2.5h11L13 10V6.5a4 4 0 0 0-4-4Z", "M7.5 14.5a1.6 1.6 0 0 0 3 0"],
+  shield: ["M9 2.5l5 2v4.2c0 3-2.1 5.2-5 6.3-2.9-1.1-5-3.3-5-6.3V4.5Z", "M6.8 9l1.7 1.7 2.9-3.1"],
+  approve: ["M9 15.5a6.5 6.5 0 1 0 0-13 6.5 6.5 0 0 0 0 13Z", "M6.5 9l2 2 3.5-4"],
+  bolt: ["M10 2.5 4.5 10H9l-1 5.5L13.5 8H9Z"],
+  chat: ["M3.5 4.5h11v7h-6l-3 2.5v-2.5h-2Z"],
+  plan: ["M4.5 4.5h9v10h-9Z", "M7 3.5h4v2H7Z", "M7 9h4", "M7 11.75h2.5"],
+  clock: ["M9 15.5a6.5 6.5 0 1 0 0-13 6.5 6.5 0 0 0 0 13Z", "M9 5.5V9l2.5 1.5"],
+  repeat: ["M3.5 8V7a2 2 0 0 1 2-2h8", "M11.5 3l2 2-2 2", "M14.5 10v1a2 2 0 0 1-2 2h-8", "M6.5 15l-2-2 2-2"],
+  level: ["M4 14.5v-3", "M7.5 14.5v-6", "M11 14.5v-9", "M14.5 14.5v-12"],
+  chevron: ["M5.5 7.5 9 11l3.5-3.5"],
+  plus: ["M9 3.5v11", "M3.5 9h11"],
+  x: ["M5 5l8 8", "M13 5l-8 8"],
+  minus: ["M5 9h8"],
+  progress: ["M9 3.5a5.5 5.5 0 1 0 5.5 5.5"],
+  more: ["M4.5 9.9a.9.9 0 1 1 0-1.8.9.9 0 0 1 0 1.8Z", "M9 9.9a.9.9 0 1 1 0-1.8.9.9 0 0 1 0 1.8Z", "M13.5 9.9a.9.9 0 1 1 0-1.8.9.9 0 0 1 0 1.8Z"],
+  sparkle: ["M9 2.5l1.6 4.9 4.9 1.6-4.9 1.6L9 15.5l-1.6-4.9L2.5 9l4.9-1.6Z"],
+  moon: ["M14.5 10.5A6 6 0 0 1 7.5 3.5a6 6 0 1 0 7 7Z"],
+  sun: ["M9 12a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z", "M9 2v1.5M9 14.5V16M2 9h1.5M14.5 9H16M4.1 4.1l1 1M12.9 12.9l1 1M13.9 4.1l-1 1M5.1 12.9l-1 1"],
+};
+
+function lineIcon(name) {
+  // level1..level4 are the same four bars; the ones above the level are dimmed.
+  const level = /^level([1-4])$/.exec(name);
+  const svg = svgEl("svg", { viewBox: "0 0 18 18", class: "ico", "aria-hidden": "true" });
+  (ICON_PATHS[level ? "level" : name] || []).forEach((d, i) => {
+    const path = svgEl("path", { d });
+    if (level && i >= Number(level[1])) path.setAttribute("class", "dim");
+    svg.append(path);
+  });
+  return svg;
+}
+
+function cogIcon() {
+  return lineIcon("cog");
+}
+
+attachBtn.replaceChildren(lineIcon("plus"));
+
+function appSettingsButton() {
+  const el = document.createElement("button");
+  el.type = "button";
+  el.className = "icon-btn";
+  el.setAttribute("aria-label", "App settings");
+  el.append(cogIcon());
+  el.addEventListener("click", () => openAppSettings());
+  return el;
+}
+
+function openAppSettings() {
+  const { panel, body } = settingsSheet("App settings");
+  body.append(
+    settingsGroup("Appearance", appearanceControl()),
+    themeGroup(),
+    settingsGroup("Skeptical review", skepticDefaultsBlock()),
+    settingsGroup("Notifications", notifyBlock()),
+    button("Log out", logout, "wide")
+  );
+  setsheet.replaceChildren(panel);
+  setsheet.hidden = false;
+  panel.scrollTop = 0;
+}
+
+function paintOptbar() {
+  const bar = document.getElementById("optbar");
+  if (!bar) return;
+  const where = route().name;
+  if (where !== "chat" && where !== "new") {
+    bar.hidden = true;
+    return;
+  }
+  const mode = modeChoice(currentModeState());
+  const state = currentReasoningState();
+  const reason = reasoningChoice(state);
+  const reasonText = reasoningChipText(reason.id, state.model);
+  let cog = bar.querySelector(".opt-cog");
+  let modeBtn = bar.querySelector("[data-mode]");
+  let reasonBtn = bar.querySelector("[data-reasoning]");
+  if (!cog || !modeBtn || !reasonBtn) {
+    bar.replaceChildren();
+    cog = document.createElement("button");
+    cog.type = "button";
+    cog.className = "opt-cog";
+    cog.setAttribute("aria-label", "Session settings");
+    cog.append(cogIcon());
+    cog.addEventListener("click", (event) => openSettingsMenu(event.currentTarget));
+    modeBtn = document.createElement("button");
+    modeBtn.type = "button";
+    modeBtn.className = "opt-chip";
+    modeBtn.addEventListener("click", (event) => openModeSheet(event.currentTarget));
+    reasonBtn = document.createElement("button");
+    reasonBtn.type = "button";
+    reasonBtn.className = "opt-chip";
+    reasonBtn.addEventListener("click", (event) => openReasoningSheet(event.currentTarget));
+    bar.append(cog, modeBtn, reasonBtn);
+  }
+  bar.hidden = false;
+  modeBtn.dataset.mode = mode.id;
+  modeBtn.textContent = mode.label;
+  modeBtn.setAttribute("aria-label", "Mode, " + mode.label);
+  reasonBtn.dataset.reasoning = reason.id;
+  reasonBtn.textContent = reasonText;
+  reasonBtn.setAttribute("aria-label", "Reasoning, " + reasonText);
+  if (reason.id === "ultra") reasonBtn.title = ULTRA_HELP;
+  else reasonBtn.removeAttribute("title");
+}
+
+// The cog: Dark and Light apply at once; the rest of a session's settings open in the full panel.
+function openSettingsMenu(anchor) {
+  const dark = (document.documentElement.dataset.appearance || "dark") !== "light";
+  openSheet([
+    { label: "Dark", icon: "moon", selected: dark, run: () => { closeSheet(); chooseAppearance("dark"); } },
+    { label: "Light", icon: "sun", selected: !dark, run: () => { closeSheet(); chooseAppearance("light"); } },
+    { label: "Session settings", icon: "cog", run: () => { closeSheet(); if (route().name === "chat") openSettings(); else openDraftSettings(); } },
+  ], anchor);
+}
+
+function openDraftSettings() {
+  const { panel, body } = settingsSheet("Session settings");
+  const prefs = prefsBlock(app.draft, (next) => {
+    app.draft.model = next.model;
+    app.draft.permissionMode = next.permissionMode;
+    setBanner(next.permissionMode);
+  }, { cwdEditable: false });
+  const fields = [...prefs.querySelectorAll(":scope > .field")];
+  const labeled = (name) => fields.find((el) => el.firstChild && el.firstChild.textContent === name);
+  const themeGrid = themePicker(app.draft.theme || "", (id) => {
+    app.draft.theme = id;
+  });
+  const note = document.createElement("p");
+  note.className = "mode-note";
+  note.textContent = "Context use appears after the first turn.";
+  body.append(
+    settingsGroup("Appearance", appearanceControl()),
+    settingsGroup("Theme", themeGrid),
+    settingsGroup("Model", bareField(labeled("Model"), "Model")),
+    settingsGroup("Approvals", bareField(labeled("Permission"), "Permission"), prefs.querySelector(":scope > .mode-note")),
+    settingsGroup("Context", note)
+  );
+  setsheet.replaceChildren(panel);
+  setsheet.hidden = false;
+  panel.scrollTop = 0;
+}
+
+function openModeSheet(anchor) {
+  const current = modeChoice(currentModeState());
+  const options = [
+    ["normal", "Normal", "chat"],
+    ["plan", "Plan", "plan"],
+    ["long", "Long run", "clock"],
+    ["loops", "Loops", "repeat"],
+  ];
+  openSheet(options.map(([id, label, icon]) => ({ label, icon, selected: current.id === id, run: () => chooseMode(id) })), anchor);
+}
+
+function openReasoningSheet(anchor) {
+  const current = reasoningChoice(currentReasoningState());
+  const options = [["low", "Low", "level1"], ["medium", "Medium", "level2"], ["high", "High", "level3"], ["xhigh", "Extra high", "level4"]];
+  openSheet([
+    ...options.map(([id, label, icon]) => ({ label, icon, selected: current.id === id, run: () => chooseReasoning(id) })),
+    { label: "Ultra", icon: "sparkle", title: ULTRA_HELP, selected: current.id === "ultra", run: () => chooseReasoning("ultra") },
+    { text: "Ultra plans, builds, reviews, and unslops in tiers. Based on pstack's poteto-mode.", info: true },
+  ], anchor);
+}
+
+async function chooseReasoning(id) {
+  closeSheet();
+  const next = applyReasoning(id);
+  if (route().name !== "chat") {
+    app.draft.effort = next.effort;
+    app.draft.ultra = next.ultra;
+    paintOptbar();
+    return;
+  }
+  try {
+    const saved = await api("/api/sessions/" + app.sessionId, { method: "PATCH", body: JSON.stringify(next) });
+    app.session = saved.session;
+    syncSettingsUi();
+  } catch (error) {
+    if (!error.auth) setNotice(error.message);
+  }
+}
+
+async function chooseMode(id) {
+  closeSheet();
+  if (id === "loops") {
+    await openLoops();
+    return;
+  }
+  if (id === "long") {
+    await chooseLongRun();
+    return;
+  }
+  const on = id === "plan";
+  if (route().name !== "chat") {
+    app.draft.plan = on;
+    app.draft.longRun = false;
+    headerNewBadge();
+    paintOptbar();
+    return;
+  }
+  if (longRunActive(app.longRun)) {
+    const stopped = await longRunAction("stop");
+    if (!stopped) return;
+  }
+  await setPlan(on);
+}
+
+function openDraftHours() {
+  const form = document.createElement("form");
+  form.className = "sheet-form";
+  const hours = document.createElement("input");
+  hours.type = "number";
+  hours.min = "0.5";
+  hours.max = "48";
+  hours.step = "0.5";
+  hours.value = String(app.draft.longHours || 12);
+  hours.setAttribute("aria-label", "Long run hours");
+  const save = document.createElement("button");
+  save.type = "submit";
+  save.textContent = "Set budget";
+  form.append(hours, save);
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    app.draft.longHours = Number(hours.value) || 12;
+    closeSheet();
+    setNotice("Long run starts with your first message. Budget is " + app.draft.longHours + " hours.");
+    paintOptbar();
+  });
+  openSheet([
+    { text: "Long run starts with your first message. The budget is the number of hours below.", info: true },
+    { node: form },
+  ]);
+}
+
+function openLongStart() {
+  const form = document.createElement("form");
+  form.className = "sheet-form";
+  const goal = document.createElement("input");
+  goal.placeholder = "Goal";
+  goal.setAttribute("aria-label", "Long run goal");
+  const hours = document.createElement("input");
+  hours.type = "number";
+  hours.min = "0.5";
+  hours.max = "48";
+  hours.step = "0.5";
+  hours.value = "12";
+  hours.setAttribute("aria-label", "Long run hours");
+  const start = document.createElement("button");
+  start.type = "submit";
+  start.textContent = "Start";
+  form.append(goal, hours, start);
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const text = goal.value.trim();
+    const n = Number(hours.value) || 12;
+    if (!text) {
+      setNotice("Enter a goal for the long run.");
+      return;
+    }
+    closeSheet();
+    if (app.session?.plan) await setPlan(false);
+    await longRunAction("start", { goal: text, hours: n });
+  });
+  openSheet([
+    { text: "A long run keeps going until the goal is done or the time budget ends.", info: true },
+    { node: form },
+  ]);
+}
+
+function openLongStatus() {
+  openSheet([
+    { text: "This session is already in a long run.", info: true },
+    { label: "Stop long run", danger: true, run: async () => { closeSheet(); await longRunAction("stop"); } },
+  ]);
+}
+
+async function chooseLongRun() {
+  if (route().name !== "chat") {
+    app.draft.plan = false;
+    app.draft.longRun = true;
+    if (!app.draft.longHours) app.draft.longHours = 12;
+    headerNewBadge();
+    paintOptbar();
+    setNotice("Long run starts with your first message. Budget is " + (app.draft.longHours || 12) + " hours.");
+    openDraftHours();
+    return;
+  }
+  const lr = app.longRun;
+  if (lr && lr.status === "running") {
+    openLongStatus();
+    return;
+  }
+  if (lr && ["paused", "stalled", "blocked"].includes(lr.status)) {
+    if (app.session?.plan) await setPlan(false);
+    await longRunAction("resume");
+    return;
+  }
+  openLongStart();
 }
 
 // One action slot: Send (idle), Stop (running + empty), Send now (running + content).
@@ -2448,9 +3341,6 @@ async function loadUsage(id) {
     if (skUsage) skUsage.textContent = u.skeptic?.reviews ? "This session: " + u.skeptic.reviews + " review" + (u.skeptic.reviews === 1 ? "" : "s") + ", " + kTokens(u.skeptic.tokens) + " tokens" + (u.skeptic.costUsd ? ", about $" + u.skeptic.costUsd.toFixed(2) : "") + "." : "";
     if (u.context) parts.push(["Context", kTokens(u.context.used) + " / " + kTokens(u.context.window)]);
     box.replaceChildren();
-    const label = document.createElement("div");
-    label.className = "field-label";
-    label.textContent = "Usage";
     const grid = document.createElement("div");
     grid.className = "usage-grid";
     for (const [k, v] of parts) {
@@ -2460,21 +3350,10 @@ async function loadUsage(id) {
       cell.querySelector("small").textContent = k;
       grid.append(cell);
     }
-    box.append(label, grid);
+    box.append(grid);
   } catch (error) {
     if (!error.auth) box.textContent = "Usage unavailable.";
   }
-}
-
-function sessionActions(id) {
-  const row = document.createElement("div");
-  row.className = "session-actions";
-  const archived = !!app.session?.archived;
-  row.append(
-    button(archived ? "Unarchive" : "Archive", () => archiveSession(id, !archived)),
-    button("Delete", () => confirmDelete(id), "danger")
-  );
-  return row;
 }
 
 async function archiveSession(id, on) {
@@ -2487,22 +3366,78 @@ async function archiveSession(id, on) {
   }
 }
 
+// Deleting a session: swipe a phone row, the trash button on a desktop row, or the + menu. One confirm for all three.
+// The server moves the folder to data/trash and refuses a running session, so the confirm says that up front.
+const confirmBox = document.getElementById("confirm");
+
+function closeConfirm() {
+  confirmBox.hidden = true;
+  confirmBox.querySelector(".confirm-panel").replaceChildren();
+}
+
+function openConfirm({ title, text, label, danger, run, cancel = "Cancel" }) {
+  const panel = confirmBox.querySelector(".confirm-panel");
+  panel.setAttribute("aria-label", title);
+  const heading = document.createElement("h2");
+  heading.textContent = title;
+  const body = document.createElement("p");
+  body.textContent = text;
+  const actions = document.createElement("div");
+  actions.className = "confirm-actions";
+  if (run) {
+    const go = button(label, async () => {
+      closeConfirm();
+      await run();
+    }, "confirm-go" + (danger ? " danger" : " primary"));
+    actions.append(go);
+  }
+  actions.append(button(cancel, () => closeConfirm(), "confirm-cancel"));
+  panel.replaceChildren(heading, body, actions);
+  confirmBox.hidden = false;
+  actions.querySelector("button").focus();
+}
+
+confirmBox.addEventListener("click", (event) => {
+  if (event.target === confirmBox) closeConfirm();
+});
+
+async function deleteSession(id) {
+  try {
+    await api("/api/sessions/" + id, { method: "DELETE", body: "{}" });
+  } catch (error) {
+    if (!error.auth) setNotice(error.message);
+    return;
+  }
+  app.sessions = (app.sessions || []).filter((session) => session.id !== id);
+  const where = route();
+  if (where.name === "chat" && where.id === id) go("/");
+  else if (where.name === "list" && !isDesktop()) renderList(++app.gen);
+  if (isDesktop()) renderSide();
+}
+
+function askDeleteSession(session) {
+  const name = (session && session.title) || "New session";
+  const running = !!(session && (session.running || (session.id === app.sessionId && app.running)));
+  if (running) {
+    openConfirm({
+      title: "Stop it first",
+      text: "“" + name + "” is running. Stop the turn, then delete the session.",
+      cancel: "OK",
+    });
+    return;
+  }
+  openConfirm({
+    title: "Delete “" + name + "”?",
+    text: "It moves to Grok Deck's trash and leaves the list.",
+    label: "Delete",
+    danger: true,
+    run: () => deleteSession(session.id),
+  });
+}
+
 function confirmDelete(id) {
-  const title = (app.session && app.session.title) || "this session";
-  openSheet([
-    { text: "Delete “" + title + "”? It moves to Grok Deck's trash and disappears from the list.", info: true },
-    { label: "Delete session", danger: true, run: async () => {
-      try {
-        await api("/api/sessions/" + id, { method: "DELETE", body: "{}" });
-        closeSheet();
-        go("/");
-      } catch (error) {
-        closeSheet();
-        if (!error.auth) setNotice(error.message);
-      }
-    } },
-    { label: "Cancel", run: () => closeSheet() },
-  ]);
+  const known = (app.sessions || []).find((session) => session.id === id);
+  askDeleteSession({ ...(app.session || {}), ...(known || {}), id });
 }
 
 // Notifications (Web Push). iOS only allows them from the Home Screen app over HTTPS.
@@ -2561,15 +3496,15 @@ async function disableNotifications() {
 
 async function notifyItem() {
   const st = pushState();
-  if (!st.ok) return { label: "Enable notifications", run: () => { closeSheet(); setNotice(st.why); } };
+  if (!st.ok) return { label: "Enable notifications", icon: "bell", run: () => { closeSheet(); setNotice(st.why); } };
   let sub = null;
   try {
     if (st.perm === "granted") sub = await Promise.race([currentSubscription(), new Promise((r) => setTimeout(() => r(null), 800))]);
   } catch {
     sub = null;
   }
-  if (sub) return { label: "Notifications on · Turn off", run: () => { closeSheet(); disableNotifications(); } };
-  return { label: "Enable notifications", run: () => { closeSheet(); enableNotifications(); } };
+  if (sub) return { label: "Notifications on · Turn off", icon: "bell", run: () => { closeSheet(); disableNotifications(); } };
+  return { label: "Enable notifications", icon: "bell", run: () => { closeSheet(); enableNotifications(); } };
 }
 
 function notifyBlock() {
@@ -2586,6 +3521,7 @@ const sheetPanel = sheet.querySelector(".sheet-panel");
 function closeSheet() {
   sheet.hidden = true;
   sheetPanel.replaceChildren();
+  sheetPanel.removeAttribute("style");
 }
 
 sheet.addEventListener("click", (event) => {
@@ -2594,32 +3530,19 @@ sheet.addEventListener("click", (event) => {
 
 async function menuItems() {
   const chat = route().name === "chat";
-  const items = [{ label: "Add photo", run: () => { closeSheet(); photos.click(); } }];
-  if (route().name === "chat" || route().name === "new") {
-    items.push({ label: planOn() ? "Plan mode on · Turn off" : "Plan mode (read and plan only)", accent: planOn(), run: () => { closeSheet(); setPlan(!planOn()); } });
-  }
+  const items = [{ label: "Add photo", icon: "photo", run: () => { closeSheet(); photos.click(); } }];
   if (chat) {
     const waiting = main.querySelector(".toolcard.asking");
-    if (waiting && app.running) items.unshift({ label: "Go to approval", accent: true, run: () => { closeSheet(); waiting.scrollIntoView({ block: "center", behavior: "smooth" }); } });
-    const lr = app.longRun;
-    if (lr && lr.status === "running") items.push({ label: "Long run on · Stop", accent: true, run: () => { closeSheet(); longRunAction("stop"); } });
-    else if (lr) items.push({ label: "Resume long run", run: () => { closeSheet(); longRunAction("resume"); } });
-    else items.push({ label: "Start long run…", run: () => { closeSheet(); startLongRun(); } });
+    if (waiting && app.running) items.unshift({ label: "Go to approval", icon: "approve", accent: true, run: () => { closeSheet(); waiting.scrollIntoView({ block: "center", behavior: "smooth" }); } });
     items.push(skepticMenuRow());
-    const activeLoops = (app.loops || []).filter((l) => l.status === "active");
-    items.push({ label: (app.loops || []).length ? "Loops · " + activeLoops.length + " active" : "Loops…", accent: activeLoops.length > 0, run: () => openLoops() });
-    if (activeAuto().length) items.push({ label: "Auto approve on · Turn off", accent: true, run: () => { closeSheet(); setAuto([]); } });
+    if (activeAuto().length) items.push({ label: "Auto approve on · Turn off", icon: "bolt", accent: true, run: () => { closeSheet(); setAuto([]); } });
     if (app.bypass) items.push({ text: "Always approve is on for this session. Change it in Session settings.", info: true });
-    items.push({ label: "Session settings", run: () => {
-      closeSheet();
-      openSettings();
-    } });
   }
   items.push(await notifyItem());
   if (chat) {
     const archived = !!app.session?.archived;
-    items.push({ label: archived ? "Unarchive session" : "Archive session", run: () => archiveSession(app.sessionId, !archived) });
-    items.push({ label: "Delete session", danger: true, run: () => confirmDelete(app.sessionId) });
+    items.push({ label: archived ? "Unarchive session" : "Archive session", icon: "archive", run: () => archiveSession(app.sessionId, !archived) });
+    items.push({ label: "Delete session", icon: "trash", danger: true, run: () => { closeSheet(); confirmDelete(app.sessionId); } });
   }
   return items;
 }
@@ -2650,23 +3573,68 @@ async function loopAction(lid, action) {
   openLoops();
 }
 
+function loopCreateForm() {
+  const form = document.createElement("form");
+  form.className = "sheet-form";
+  const interval = document.createElement("input");
+  interval.placeholder = "30m";
+  interval.setAttribute("aria-label", "Loop interval");
+  interval.autocomplete = "off";
+  interval.spellcheck = false;
+  const prompt = document.createElement("input");
+  prompt.placeholder = "Prompt";
+  prompt.setAttribute("aria-label", "Loop prompt");
+  const create = document.createElement("button");
+  create.type = "submit";
+  create.className = "primary";
+  create.textContent = "Create";
+  form.append(interval, prompt, create);
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const every = interval.value.trim();
+    const text = prompt.value.trim();
+    if (!every || !text) {
+      setNotice("Enter an interval and a prompt.");
+      return;
+    }
+    const saved = input.value;
+    try {
+      await sendLoopCommand("/loop " + every + " " + text);
+      input.value = saved;
+      growInput();
+      paintSend();
+      await openLoops();
+    } catch (error) {
+      input.value = saved;
+      growInput();
+      paintSend();
+      if (!error.auth) setNotice(error.message);
+    }
+  });
+  return form;
+}
+
 async function openLoops() {
+  if (route().name !== "chat" || !app.sessionId) {
+    setNotice("Loops run in an existing session. Send a first message, then create a loop.");
+    return;
+  }
   try {
     const data = await api("/api/sessions/" + app.sessionId + "/loops");
     app.loops = data.loops || [];
   } catch {
     // show what we have
   }
-  const items = [];
-  if (!app.loops.length) items.push({ text: "No loops. Type /loop 30m <prompt> to repeat a prompt every 30 minutes (5 min minimum). Add x10 for at most 10 runs, or \"until DONE\" to stop when the reply says DONE.", info: true });
+  const items = [{ node: loopCreateForm() }];
+  if (!app.loops.length) items.push({ text: "No loops yet. Set an interval and a prompt above (5 min minimum). Add x10 for at most 10 runs, or until DONE to stop when the reply says DONE.", info: true });
   for (const l of app.loops) {
     items.push({ text: loopSummary(l), info: true });
     if (l.status === "active") items.push({ label: "Pause", run: () => loopAction(l.id, "pause") });
     else items.push({ label: "Resume", accent: true, run: () => loopAction(l.id, "resume") });
     items.push({ label: "Delete loop", danger: true, run: () => loopAction(l.id, "delete") });
   }
-  items.push({ label: "Back", run: () => openSheet() });
   openSheet(items);
+  paintOptbar();
 }
 
 async function sendLoopCommand(text) {
@@ -2687,30 +3655,86 @@ async function sendLoopCommand(text) {
   if (data.action === "list") openLoops();
   else if (data.action === "stop") setNotice(data.removed ? "Stopped " + data.removed + " loop" + (data.removed === 1 ? "" : "s") + "." : "No loops to stop.");
   else setNotice("Loop set: every " + data.loop.label + ". First run " + (app.running ? "queued after this turn." : "starting now."));
+  paintOptbar();
   return true;
 }
 
-async function openSheet(items) {
+// One popover for every composer menu (+, Mode, Reasoning, settings) and the session menu on a desktop row. It floats
+// above the button that opened it, on the phone and on desktop, and clamps to the screen. Outside tap or Esc closes it.
+// An item is { label, icon, run, selected, danger, accent }, { text, info } for a caption, or { node } for a form.
+let sheetAnchor = null;
+
+function menuRow(item) {
+  const el = button("", item.run, "sheet-item" + (item.danger ? " danger" : "") + (item.accent ? " accent" : ""));
+  if (item.title) el.title = item.title;
+  el.setAttribute("role", item.selected === undefined ? "menuitem" : "menuitemradio");
+  if (item.selected !== undefined) el.setAttribute("aria-checked", item.selected ? "true" : "false");
+  if (item.icon) el.append(lineIcon(item.icon));
+  const label = document.createElement("span");
+  label.className = "sheet-label";
+  label.textContent = item.label;
+  el.append(label);
+  if (item.selected) {
+    const mark = lineIcon("check");
+    mark.classList.add("sheet-check");
+    el.append(mark);
+  }
+  return el;
+}
+
+function placePopover() {
+  if (sheet.hidden) return;
+  const margin = 8;
+  const vv = window.visualViewport;
+  const width = Math.round(vv?.width || window.innerWidth);
+  const top = Math.round(vv?.offsetTop || 0);
+  const height = Math.round(vv?.height || window.innerHeight);
+  const box = Math.min(320, width - margin * 2);
+  sheetPanel.style.width = box + "px";
+  sheetPanel.style.maxHeight = "";
+  const anchor = sheetAnchor && sheetAnchor.isConnected ? sheetAnchor.getBoundingClientRect() : null;
+  if (!anchor) {
+    sheetPanel.style.left = Math.round((width - box) / 2) + "px";
+    sheetPanel.style.bottom = "auto";
+    sheetPanel.style.maxHeight = height - margin * 2 + "px";
+    sheetPanel.style.top = Math.round(top + height - sheetPanel.getBoundingClientRect().height - margin) + "px";
+    return;
+  }
+  const above = anchor.top - top - margin * 2;
+  const below = top + height - anchor.bottom - margin * 2;
+  const wanted = sheetPanel.scrollHeight;
+  const up = above >= Math.min(wanted, 360) || above >= below;
+  sheetPanel.style.left = Math.round(Math.min(Math.max(anchor.left, margin), width - box - margin)) + "px";
+  // Placed by top only: no viewport height is read, so a stale innerHeight on iOS cannot misplace it.
+  sheetPanel.style.bottom = "auto";
+  sheetPanel.style.maxHeight = Math.max(120, up ? above : below) + "px";
+  sheetPanel.style.top = Math.round(up ? anchor.top - sheetPanel.getBoundingClientRect().height - margin : anchor.bottom + margin) + "px";
+}
+
+async function openSheet(items, anchor) {
   const list = items || (await menuItems());
+  if (anchor) sheetAnchor = anchor;
   sheetPanel.replaceChildren();
   for (const item of list) {
-    if (item.info) {
+    if (item.node) {
+      sheetPanel.append(item.node);
+    } else if (item.info) {
       const p = document.createElement("p");
       p.className = "sheet-info";
       p.textContent = item.text;
       sheetPanel.append(p);
-      continue;
+    } else {
+      sheetPanel.append(menuRow(item));
     }
-    const el = button(item.label, item.run, "sheet-item" + (item.danger ? " danger" : "") + (item.accent ? " accent" : ""));
-    sheetPanel.append(el);
   }
-  if (!items) sheetPanel.append(button("Close", () => closeSheet(), "sheet-item close"));
   sheet.hidden = false;
+  placePopover();
 }
 
 document.addEventListener("keydown", (event) => {
   if (event.key !== "Escape") return;
-  if (!sheet.hidden) closeSheet();
+  if (!confirmBox.hidden) closeConfirm();
+  else if (!sheet.hidden) closeSheet();
   else closeSettings();
 });
 
@@ -2738,7 +3762,7 @@ input.addEventListener("input", () => {
   paintSend();
 });
 
-attachBtn.addEventListener("click", () => openSheet());
+attachBtn.addEventListener("click", () => openSheet(undefined, attachBtn));
 
 photos.addEventListener("change", () => {
   const files = [...(photos.files || [])];
@@ -2844,11 +3868,12 @@ main.addEventListener("click", async (event) => {
   if (!code) return;
   const ok = await copyText(code.textContent || "");
   flashCopied(copy);
-  if (!ok) copy.textContent = "Copy failed";
+  if (!ok) copy.setAttribute("aria-label", "Copy failed");
 });
 
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState !== "visible") return;
+  if (document.querySelector(".plan-usage") && Date.now() - planAt >= PLAN_MS) notePlanUsageStale();
   refreshTheme();
   const where = route();
   if (where.name === "chat" && (!app.es || app.es.readyState !== EventSource.OPEN)) {
@@ -2888,8 +3913,17 @@ viewer.addEventListener("click", () => {
 window.visualViewport?.addEventListener("resize", handleViewport);
 window.visualViewport?.addEventListener("scroll", handleViewport);
 window.addEventListener("resize", handleViewport);
+window.addEventListener("scroll", resetDocumentScroll, { passive: true });
+// iOS moves the page after focus and, installed, sends no resize when the keyboard closes: look again while it settles.
+function settleViewport() {
+  handleViewport();
+  for (const ms of [120, 400]) setTimeout(handleViewport, ms);
+}
+document.addEventListener("focusin", settleViewport);
+document.addEventListener("focusout", settleViewport);
 handleViewport();
 growInput();
+applyAppearance(storedAppearance() || "dark");
 refreshTheme();
 registerWorker();
 renderRoute();
@@ -2898,10 +3932,102 @@ setInterval(refreshTheme, 15000);
 
 // ---- Desktop: sessions sidebar, shortcuts, help overlay (only at 1024px and up) ----
 const side = document.getElementById("side");
+const sideResize = document.getElementById("side-resize");
 const keys = document.getElementById("keys");
 const wide = matchMedia("(min-width: 1024px)");
 let sideRows = [];
 let sideArchived = false;
+let sideQuery = "";
+const SIDEBAR_KEY = "gm-sidebar-w";
+const SIDEBAR_DEFAULT = 280;
+const SIDEBAR_MIN = 220;
+const SIDEBAR_MAX = 480;
+const SIDEBAR_STEP = 16;
+let sideDrag = null;
+
+function sidebarLimit() {
+  return Math.min(SIDEBAR_MAX, Math.round(window.innerWidth * 0.4));
+}
+
+function clampSidebar(px) {
+  const cap = sidebarLimit();
+  const min = Math.min(SIDEBAR_MIN, cap);
+  const n = Number(px);
+  return Math.round(Math.min(cap, Math.max(min, Number.isFinite(n) ? n : SIDEBAR_DEFAULT)));
+}
+
+function storedSidebar() {
+  try {
+    const raw = localStorage.getItem(SIDEBAR_KEY);
+    if (raw == null || raw === "") return null;
+    const n = Number(raw);
+    return Number.isFinite(n) ? n : null;
+  } catch {
+    return null;
+  }
+}
+
+function paintSidebarWidth(px, persist) {
+  const next = clampSidebar(px);
+  document.documentElement.style.setProperty("--sidebar-w", next + "px");
+  sideResize.setAttribute("aria-valuemin", String(Math.min(SIDEBAR_MIN, sidebarLimit())));
+  sideResize.setAttribute("aria-valuemax", String(sidebarLimit()));
+  sideResize.setAttribute("aria-valuenow", String(next));
+  if (persist) {
+    try { localStorage.setItem(SIDEBAR_KEY, String(next)); } catch { /* private mode keeps the visit */ }
+  }
+  return next;
+}
+
+function currentSidebar() {
+  const n = parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--sidebar-w"));
+  return Number.isFinite(n) ? n : SIDEBAR_DEFAULT;
+}
+
+function resetSidebar() {
+  try { localStorage.removeItem(SIDEBAR_KEY); } catch { /* keep the painted default */ }
+  paintSidebarWidth(SIDEBAR_DEFAULT, false);
+}
+
+paintSidebarWidth(storedSidebar() ?? SIDEBAR_DEFAULT, false);
+
+sideResize.addEventListener("pointerdown", (event) => {
+  if (!isDesktop() || side.hidden || event.button !== 0) return;
+  event.preventDefault();
+  sideResize.setPointerCapture(event.pointerId);
+  sideDrag = { id: event.pointerId, x: event.clientX, w: currentSidebar() };
+  sideResize.classList.add("dragging");
+  document.documentElement.classList.add("side-drag");
+});
+sideResize.addEventListener("pointermove", (event) => {
+  if (!sideDrag || event.pointerId !== sideDrag.id) return;
+  paintSidebarWidth(sideDrag.w + event.clientX - sideDrag.x, false);
+});
+function endSideDrag(event) {
+  if (!sideDrag || event.pointerId !== sideDrag.id) return;
+  const next = sideDrag.w + event.clientX - sideDrag.x;
+  sideDrag = null;
+  sideResize.classList.remove("dragging");
+  document.documentElement.classList.remove("side-drag");
+  paintSidebarWidth(next, true);
+}
+sideResize.addEventListener("pointerup", endSideDrag);
+sideResize.addEventListener("pointercancel", endSideDrag);
+sideResize.addEventListener("dblclick", (event) => {
+  event.preventDefault();
+  resetSidebar();
+});
+sideResize.addEventListener("keydown", (event) => {
+  if (!isDesktop() || side.hidden) return;
+  if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+  event.preventDefault();
+  const step = (event.shiftKey ? SIDEBAR_STEP * 2 : SIDEBAR_STEP) * (event.key === "ArrowLeft" ? -1 : 1);
+  paintSidebarWidth(currentSidebar() + step, true);
+});
+window.addEventListener("resize", () => {
+  if (sideDrag) return;
+  paintSidebarWidth(storedSidebar() ?? SIDEBAR_DEFAULT, false);
+});
 
 function isDesktop() {
   return wide.matches;
@@ -2910,9 +4036,12 @@ function isDesktop() {
 async function renderSide() {
   if (!isDesktop() || !app.authed) {
     side.hidden = true;
+    sideResize.hidden = true;
     return;
   }
   side.hidden = false;
+  sideResize.hidden = false;
+  paintSidebarWidth(storedSidebar() ?? SIDEBAR_DEFAULT, false);
   let data;
   try {
     const res = await fetch("/api/sessions", { credentials: "same-origin" });
@@ -2924,58 +4053,129 @@ async function renderSide() {
   app.sessions = data.sessions || [];
   const current = route().id || "";
   const all = app.sessions;
-  sideRows = all.filter((x) => !!x.archived === sideArchived);
+  const previous = document.querySelector("#side .side-search");
+  if (previous) sideQuery = previous.value;
+  const restoreFocus = previous && document.activeElement === previous;
+  const caret = restoreFocus ? previous.selectionStart : null;
   side.replaceChildren();
   const head = document.createElement("div");
   head.className = "side-head";
+  const headRow = document.createElement("div");
+  headRow.className = "side-head-row";
   const h = document.createElement("h2");
   h.textContent = "Grok Deck";
-  const fresh = button("+ New", () => go("/new"), "primary side-new");
+  const fresh = button("New", () => go("/new"), "side-new");
   fresh.title = "New session (Ctrl+N)";
-  head.append(h, fresh);
+  fresh.setAttribute("aria-label", "New session");
+  headRow.append(h, fresh);
+  const search = document.createElement("input");
+  search.className = "filter side-search";
+  search.placeholder = "Search";
+  search.setAttribute("aria-label", "Search sessions");
+  search.value = sideQuery;
+  head.append(headRow, search);
   const list = document.createElement("nav");
   list.className = "side-list";
-  for (const session of sideRows) {
-    const row = document.createElement("a");
-    row.href = "/s/" + session.id;
-    row.className = "side-row" + (session.id === current ? " on" : "");
-    row.addEventListener("click", (event) => {
-      event.preventDefault();
-      go("/s/" + session.id);
-    });
-    const dot = document.createElement("i");
-    dot.className = "side-dot" + (session.running ? " run" : "") + (session.waiting ? " wait" : "");
-    const theme = themeById(session.theme || app.globalTheme || "purple");
-    if (theme) dot.style.background = theme.vars["--accent"];
-    const title = document.createElement("span");
-    title.className = "side-title";
-    title.textContent = session.title || "New session";
-    const meta = document.createElement("small");
-    meta.textContent = session.waiting ? "Needs approval" : session.running ? "Running" : relTime(session.updatedAt);
-    row.append(dot, title, meta);
-    list.append(row);
-  }
-  if (!sideRows.length) {
-    const p = document.createElement("p");
-    p.className = "hint";
-    p.textContent = sideArchived ? "No archived sessions." : "No sessions yet.";
-    list.append(p);
+  const paintList = () => {
+    const query = search.value.trim().toLowerCase();
+    sideQuery = search.value;
+    sideRows = all.filter((session) => !!session.archived === sideArchived && sessionMatches(session, query));
+    list.replaceChildren();
+    if (!sideRows.length) {
+      list.append(listEmpty(sideArchived ? "archived" : query ? "search" : "none"));
+      return;
+    }
+    for (const [label, items] of sessionGroups(sideRows)) {
+      const heading = document.createElement("h3");
+      heading.className = "list-group";
+      heading.textContent = label;
+      list.append(heading);
+      for (const session of items) {
+        const active = session.id === current;
+        const row = document.createElement("div");
+        row.className = "side-row" + (active ? " on" : "");
+        row.dataset.theme = session.theme || "";
+        const accent = sessionAccent(session.theme);
+        if (accent) row.style.setProperty("--row-accent", accent);
+        const hit = document.createElement("a");
+        hit.href = "/s/" + session.id;
+        hit.className = "side-hit";
+        hit.addEventListener("click", (event) => {
+          event.preventDefault();
+          go("/s/" + session.id);
+        });
+        const mark = document.createElement("span");
+        mark.className = "side-mark";
+        mark.setAttribute("aria-hidden", "true");
+        const dot = document.createElement("i");
+        dot.className = "side-dot" + (session.running ? " run" : "") + (session.waiting ? " wait" : "");
+        if (accent) dot.style.background = accent;
+        hit.append(mark, dot, sessionMain(session, "side"));
+        row.append(hit);
+        // One way to delete from a row: the open session has the ⋯ menu (it lists Delete); the others show a trash on hover.
+        const actions = document.createElement("span");
+        actions.className = "side-actions";
+        if (!active) {
+          const trash = button("", () => askDeleteSession(session), "side-del");
+          trash.setAttribute("aria-label", "Delete " + (session.title || "New session"));
+          trash.title = "Delete session";
+          trash.append(lineIcon("trash"));
+          actions.append(trash);
+        }
+        row.append(actions);
+        if (active && isDesktop()) {
+          const menu = document.createElement("button");
+          menu.type = "button";
+          menu.className = "side-menu";
+          menu.setAttribute("aria-label", "Session menu");
+          menu.append(lineIcon("more"));
+          const flag = document.createElement("span");
+          flag.className = "flag-dot";
+          flag.setAttribute("aria-hidden", "true");
+          menu.append(flag);
+          menu.addEventListener("click", (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            openSheet(undefined, menu);
+          });
+          actions.prepend(menu);
+        }
+        list.append(row);
+      }
+    }
+  };
+  search.addEventListener("input", paintList);
+  paintList();
+  if (restoreFocus) {
+    search.focus();
+    if (caret != null) search.setSelectionRange(caret, caret);
   }
   const count = all.filter((x) => x.archived).length;
   const foot = document.createElement("div");
   foot.className = "side-foot";
   if (count || sideArchived) foot.append(button(sideArchived ? "Back to sessions" : "Archived (" + count + ")", () => { sideArchived = !sideArchived; renderSide(); }, "linkish"));
+  const settings = button("Settings", () => openAppSettings(), "linkish");
+  settings.setAttribute("aria-label", "App settings");
+  foot.append(settings);
   foot.append(button("? Shortcuts", () => showKeys(), "linkish"));
+  mountPlanUsage(foot);
   side.append(head, list, foot);
+  paintPlus();
 }
 
 setInterval(() => {
   if (isDesktop() && document.visibilityState === "visible") renderSide();
 }, 5000);
+setInterval(() => {
+  if (document.visibilityState !== "visible" || !app.authed) return;
+  if (!document.querySelector(".plan-usage")) return;
+  notePlanUsageStale();
+}, PLAN_MS);
 wide.addEventListener("change", () => {
   renderSide();
-  // Rebuild the chat header so the back arrow appears/disappears with the sidebar.
-  if (app.sessionId || route().name === "new") headerForChat();
+  const where = route();
+  if (where.name === "chat" || where.name === "new") headerForChat();
+  else if (app.authed) renderList(++app.gen);
 });
 
 function moveSession(step) {
@@ -2998,6 +4198,7 @@ function showKeys() {
     ["Ctrl + K", "Switch session"],
     ["Ctrl + N", "New session"],
     ["Alt + ↑ / ↓", "Previous / next session"],
+    ["← / →", "Resize the sessions pane when its edge is focused"],
     ["Esc", "Close panels and menus"],
     ["?", "This help"],
     ["Paste or drop", "Attach images"],
@@ -3042,8 +4243,13 @@ function openSwitcher() {
     list.replaceChildren();
     hits.forEach((x, i) => {
       const b = button(x.title || "New session", () => { hideKeys(); go("/s/" + x.id); }, "switch-row" + (i === pick ? " on" : ""));
-      const t = themeById(x.theme || app.globalTheme || "purple");
-      if (t) b.style.borderLeftColor = t.vars["--accent"];
+      b.dataset.theme = x.theme || "";
+      const dot = document.createElement("i");
+      dot.className = "row-dot";
+      dot.setAttribute("aria-hidden", "true");
+      const accent = sessionAccent(x.theme);
+      if (accent) dot.style.background = accent;
+      b.prepend(dot);
       list.append(b);
     });
   };
@@ -3134,6 +4340,7 @@ function agoText(ms) {
 function paintLongRun(run) {
   if (run !== undefined) app.longRun = run || null;
   const lr = app.longRun;
+  paintOptbar();
   if (!longbar) return;
   if (!lr) {
     longbar.hidden = true;
@@ -3156,19 +4363,15 @@ function paintLongRun(run) {
   longbar.append(text, btn);
 }
 async function longRunAction(action, extra = {}) {
-  if (!app.sessionId) return;
+  if (!app.sessionId) return false;
   try {
     const r = await api("/api/sessions/" + app.sessionId + "/longrun", { method: "POST", body: JSON.stringify({ action, ...extra }) });
     paintLongRun(r.longRun);
+    return true;
   } catch (error) {
     if (!error.auth) alert(error.message || "Long run change failed");
+    return false;
   }
-}
-function startLongRun() {
-  const goal = prompt("Long run goal (Grok will write GOAL.md from this):");
-  if (!goal) return;
-  const hours = Number(prompt("Time budget in hours:", "12")) || 12;
-  longRunAction("start", { goal, hours });
 }
 setInterval(() => { if (app.longRun?.status === "running") paintLongRun(); }, 15000);
 
@@ -3312,15 +4515,16 @@ async function setSkepticPref(patch) {
 
 function skepticMenuRow() {
   const r = app.skeptic;
-  if (r?.state === "running") return { label: "Skeptical review running · Cancel", accent: true, run: () => { closeSheet(); skepticAction("cancel"); } };
+  if (r?.state === "running") return { label: "Skeptical review running · Cancel", icon: "shield", accent: true, run: () => { closeSheet(); skepticAction("cancel"); } };
   const mode = skepticEffective();
   return {
     label: "Skeptical review: " + (SKEPTIC_NAMES[mode] || mode) + (app.session?.skeptic === "default" ? " (app default)" : ""),
+    icon: "shield",
     accent: mode !== "off",
     run: () => openSheet([
-      { label: "Review this turn now", run: () => { closeSheet(); skepticAction("run"); } },
-      ...SKEPTIC_MODES.map(([value, text]) => ({ label: text + ((app.session?.skeptic || "default") === value ? "  ✓" : ""), run: async () => { await setSkepticPref({ skeptic: value }); closeSheet(); } })),
-      { label: "Back", run: () => openSheet() },
+      { label: "Review this turn now", icon: "shield", run: () => { closeSheet(); skepticAction("run"); } },
+      ...SKEPTIC_MODES.map(([value, text]) => ({ label: text, selected: (app.session?.skeptic || "default") === value, run: async () => { await setSkepticPref({ skeptic: value }); closeSheet(); } })),
+      { label: "Back", icon: "back", run: () => openSheet() },
     ]),
   };
 }
@@ -3344,10 +4548,11 @@ function skepticSessionBlock(id, session) {
 function skepticDefaultsBlock() {
   const wrap = document.createElement("div");
   wrap.className = "field-group";
-  const title = document.createElement("h3");
-  title.textContent = "Skeptical review (default for sessions)";
+  const note = document.createElement("p");
+  note.className = "mode-note";
+  note.textContent = "Default for new sessions.";
   const holder = document.createElement("div");
-  wrap.append(title, holder);
+  wrap.append(note, holder);
   loadSkepticDefaults().then(() => {
     const s = app.skepticDefaults || {};
     const save = async (patch) => {

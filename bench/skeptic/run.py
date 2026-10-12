@@ -18,8 +18,8 @@ BENCH = os.path.dirname(HERE)
 sys.path.insert(0, BENCH)
 import run as overclaim  # noqa: E402  (make_home, token_ok)
 
-SRC = os.environ.get("BENCH_SRC") or os.path.expanduser("~/.cache/grok-bench")
-ROOT = os.environ.get("BENCH_ROOT") or os.path.expanduser("~/.cache/grok-skeptic-bench")
+SRC = os.path.expanduser("~/.cache/grok-bench-20261011")
+ROOT = os.path.expanduser("~/.cache/grok-skeptic-bench-20261011")
 TEMPLATE = os.path.join(SRC, "tmpl-new")
 TASKS = os.path.join(BENCH, "tasks")
 

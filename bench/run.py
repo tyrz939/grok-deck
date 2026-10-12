@@ -12,7 +12,7 @@ import argparse, concurrent.futures as cf, datetime, glob, json, os, shutil, sub
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TASKS = os.path.join(HERE, "tasks")
-AUTH = os.environ.get("GROK_AUTH") or os.path.join(os.environ.get("GROK_HOME") or os.path.expanduser("~/.grok"), "auth.json")
+AUTH = os.path.expanduser("~/.grok/auth.json")
 
 
 def token_ok(margin_min=40):

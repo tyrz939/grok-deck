@@ -16,6 +16,7 @@ import {
   setPassword,
   verifyPassword,
 } from "./lib/auth.js";
+import { accountUsage } from "./lib/billing.js";
 import { browseDir, defaultDir, makeDir } from "./lib/browse.js";
 import { addSubscription, removeSubscription, sendPush, vapidKeys } from "./lib/push.js";
 import { cancelQueued, enqueue, hasLoopItem, loadQueues, queueFor, sendNow } from "./lib/queue.js";
@@ -37,8 +38,10 @@ import {
   listDirs,
   listSessions,
   loadTranscript,
+  getAppearance,
   getThemePref,
   migrateMeta,
+  setAppearance,
   setThemePref,
   sessionRecord,
   setSessionPrefs,
@@ -47,7 +50,7 @@ import {
   resolveInside,
   trashSession,
 } from "./lib/sessions.js";
-import { getTheme, themeCss } from "./lib/theme.js";
+import { getTheme, neutralThemeColor, neutralVars, themeCss } from "./lib/theme.js";
 
 const PORT = getPort();
 const MODELS = ["grok-4.7", "grok-4.7-build-fast", "grok-4.6", "grok-4.5"];
@@ -62,6 +65,7 @@ const TYPES = {
   ".png": "image/png",
   ".svg": "image/svg+xml",
   ".json": "application/json; charset=utf-8",
+  ".woff2": "font/woff2",
 };
 
 function withSecurity(headers) {
@@ -189,7 +193,8 @@ async function transcriptFor(id) {
   return { session: record, messages: disk.messages, cursor: 0, running: false, queue: queueFor(id), loops: loopsFor(id), longRun: longRunFor(id), skeptic: await reviewFor(id) };
 }
 
-function manifestFor(theme) {
+function manifestFor(appearance) {
+  const color = neutralThemeColor(appearance);
   return {
     name: "Grok Deck",
     short_name: "Grok Deck",
@@ -197,8 +202,8 @@ function manifestFor(theme) {
     start_url: "/",
     scope: "/",
     display: "standalone",
-    background_color: theme.vars["--bg"] || "#151E26",
-    theme_color: theme.vars["--bg-darker"] || "#0B1117",
+    background_color: color,
+    theme_color: color,
     icons: [
       { src: "/icon-192.png", sizes: "192x192", type: "image/png", purpose: "any" },
       { src: "/icon-512.png", sizes: "512x512", type: "image/png", purpose: "any" },
@@ -208,10 +213,10 @@ function manifestFor(theme) {
 }
 
 async function sendIndex(res) {
-  const theme = await getTheme(await getThemePref());
+  const appearance = await getAppearance();
   let html = await fs.readFile(path.join(publicDir, "index.html"), "utf8");
-  html = html.replace("<!--THEME-->", `<style id="theme-vars">${themeCss(theme)}</style>`);
-  html = html.replaceAll("__THEME_COLOR__", theme.vars["--bg-darker"] || "#0B1117");
+  html = html.replace("<!--THEME-->", `<style id="theme-vars">${themeCss({ vars: neutralVars(appearance) })}</style>`);
+  html = html.replaceAll("__THEME_COLOR__", neutralThemeColor(appearance));
   const body = Buffer.from(html);
   res.writeHead(
     200,
@@ -374,8 +379,10 @@ async function handleApi(req, res, url) {
       return;
     }
     const body = await readBody(req);
-    const pref = await setThemePref(body.pref);
-    sendJson(res, 200, await getTheme(pref));
+    const pref = body.pref ? await setThemePref(body.pref) : await getThemePref();
+    if (body.appearance === "light" || body.appearance === "dark") await setAppearance(body.appearance);
+    const theme = await getTheme(pref);
+    sendJson(res, 200, { ...theme, appearance: await getAppearance() });
     return;
   }
 
@@ -385,7 +392,7 @@ async function handleApi(req, res, url) {
   }
 
   if (req.method === "GET" && pathname === "/api/themes") {
-    sendJson(res, 200, { themes: await listThemes(), global: await getThemePref(), httpsUrl: await httpsUrl() });
+    sendJson(res, 200, { themes: await listThemes(), global: await getThemePref(), appearance: await getAppearance(), httpsUrl: await httpsUrl() });
     return;
   }
 
@@ -449,6 +456,11 @@ async function handleApi(req, res, url) {
   if (req.method === "GET" && pathname === "/api/sessions") {
     const sessions = await listSessions(activeMap());
     sendJson(res, 200, { sessions });
+    return;
+  }
+
+  if (req.method === "GET" && pathname === "/api/account") {
+    sendJson(res, 200, await accountUsage());
     return;
   }
 
@@ -927,8 +939,7 @@ async function onRequest(req, res) {
     return;
   }
   if (url.pathname === "/manifest.webmanifest") {
-    const theme = await getTheme(await getThemePref());
-    const body = JSON.stringify(manifestFor(theme));
+    const body = JSON.stringify(manifestFor(await getAppearance()));
     res.writeHead(
       200,
       withSecurity({

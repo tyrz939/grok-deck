@@ -174,6 +174,14 @@ readline.createInterface({ input: process.stdin }).on("line", async (line) => {
     case "initialize":
       if (fs.existsSync(path.join(home, "hang-initialize"))) return; // never answer
       return reply({ protocolVersion: 1 });
+    case "_x.ai/billing":
+      return reply({
+        config: {
+          creditUsagePercent: 42,
+          currentPeriod: { type: "USAGE_PERIOD_TYPE_WEEKLY", start: "2026-10-06", end: "2026-10-13" },
+        },
+        subscription_tier: "Test",
+      });
     case "session/new": {
       const id = crypto.randomUUID();
       ensureSession(id, p.cwd);
