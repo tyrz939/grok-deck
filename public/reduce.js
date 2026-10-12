@@ -1,3 +1,5 @@
+import { findRefs, rewriteRefs } from "./markdown.js";
+
 export function asText(value, limit = 1200) {
   if (value == null) return "";
   let text;
@@ -212,6 +214,14 @@ export function applyEvent(state, ev) {
       step.tokens = (step.tokens || 0) + used;
       state.pendingTokens = 0;
     } else state.pendingTokens = used;
+  } else if (type === "media") {
+    // A local image reference was copied into the media store: the newest assistant message that names it now points there.
+    for (let i = state.messages.length - 1; i >= 0; i -= 1) {
+      const message = state.messages[i];
+      if (message.role !== "assistant" || !findRefs(message.text).some((token) => token.target === ev.from)) continue;
+      message.text = rewriteRefs(message.text, new Map([[ev.from, ev.to]]));
+      break;
+    }
   } else if (type === "text") appendChunk(state, "assistant", ev.data);
   else if (type === "thought") appendChunk(state, "thought", ev.data);
   else if (type === "note") {

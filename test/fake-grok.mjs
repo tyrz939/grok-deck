@@ -5,6 +5,7 @@
 //
 // Directives: [[say TEXT]]  [[sleep MS]]  [[exec CODE CMD]]  [[run CMD]] (really runs CMD, records its exit)
 //             [[wake MS TEXT]] (Grok wakes itself MS after the turn)  [[perm]] (asks for approval)
+//             [[mv FROM TO]]  [[rm FILE]] (files in the working folder)
 //             [[quiettool MS]] (a tool call that stays silent for MS)  [[write PATH TEXT]]  [[commit MSG]]
 import { execSync } from "node:child_process";
 import crypto from "node:crypto";
@@ -97,6 +98,10 @@ async function prompt(sid, text, turn) {
       notify("_x.ai/session_notification", sid, { sessionUpdate: "response_completed", usage: { input_tokens: 50, output_tokens: 5 } });
     }
     else if (kind === "sleep") await sleep(Number(arg));
+    else if (kind === "mv") {
+      const [from, to] = arg.split(" ");
+      fs.renameSync(path.join(cwd, from), path.join(cwd, to)); // the agent tidies up: the file a message named is gone
+    } else if (kind === "rm") fs.rmSync(path.join(cwd, arg.trim()), { force: true });
     else if (kind === "die") process.exit(Number(arg) || 1); // a crash mid-turn
     else if (kind === "hang") await new Promise(() => {}); // silent forever: no updates, no reply
     else if (kind === "compact") {

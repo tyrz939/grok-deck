@@ -50,6 +50,7 @@ import {
   resolveInside,
   trashSession,
 } from "./lib/sessions.js";
+import { internMessages, mediaType, statMedia } from "./lib/media.js";
 import { getTheme, neutralThemeColor, neutralVars, themeCss } from "./lib/theme.js";
 
 const PORT = getPort();
@@ -180,6 +181,8 @@ async function transcriptFor(id) {
     return { session: record, ...view, queue: queueFor(id), loops: loopsFor(id), longRun: longRunFor(id), skeptic: await reviewFor(id) };
   }
   const disk = await loadTranscript(id);
+  const found = await findSession(id);
+  await internMessages(disk.messages, id, { cwd: found?.cwd, dir: found?.dir });
   if (turn && turn.done) {
     const view = viewTurn(turn);
     const diskLongEnough = disk.messages.length >= Math.max(0, view.messages.length - 1);
@@ -489,57 +492,48 @@ async function handleApi(req, res, url) {
     return;
   }
 
-  const imageMatch = pathname.match(/^\/api\/sessions\/([0-9a-f-]{36})\/image\/([A-Za-z0-9._-]{1,100}\.(png|jpe?g|webp|gif))$/i);
-  if (imageMatch && req.method === "GET") {
-    const found = await findSession(imageMatch[1]);
-    const name = imageMatch[2];
-    if (!found || name.startsWith(".")) {
+  // The media store: the only place files in messages are served from. A name is a sha256, so it never changes.
+  // Range requests are answered because iOS will not play video or audio without them.
+  const mediaMatch = pathname.match(/^\/api\/media\/([0-9a-f]{64}\.[a-z0-9]{1,8})$/);
+  if (mediaMatch && (req.method === "GET" || req.method === "HEAD")) {
+    const found = await statMedia(mediaMatch[1]);
+    if (!found) {
       sendJson(res, 404, { error: "Not found" });
       return;
     }
-    try {
-      const imagesDir = path.join(found.dir, "images");
-      const body = await fs.readFile(await resolveInside(imagesDir, path.join(imagesDir, name)));
-      const ext = imageMatch[3].toLowerCase();
-      const type = ext === "png" ? "image/png" : ext === "webp" ? "image/webp" : ext === "gif" ? "image/gif" : "image/jpeg";
-      res.writeHead(200, withSecurity({ "Content-Type": type, "Content-Length": body.length, "Cache-Control": "private, max-age=86400" }));
-      res.end(body);
-    } catch {
-      sendJson(res, 404, { error: "Not found" });
-    }
-    return;
-  }
-
-  // Images Grok wrote into the working folder (or the session folder). Read-only and confined:
-  // the real path must sit inside the session's cwd or session dir, and must be an image file.
-  const fileMatch = pathname.match(/^\/api\/sessions\/([0-9a-f-]{36})\/file$/i);
-  if (fileMatch && req.method === "GET") {
-    const found = await findSession(fileMatch[1]);
-    const want = String(url.searchParams.get("p") || "");
-    const ext = (want.match(/\.(png|jpe?g|webp|gif)$/i) || [])[1];
-    if (!found || !ext || want.includes("\0") || want.length > 1000) {
-      sendJson(res, 404, { error: "Not found" });
-      return;
-    }
-    try {
-      const roots = [];
-      for (const r of [found.cwd, found.dir]) {
-        try { roots.push(await fs.realpath(r)); } catch { /* skip */ }
+    const type = mediaType(mediaMatch[1]);
+    const attach = type === "application/octet-stream" || url.searchParams.get("download") === "1";
+    const asked = String(url.searchParams.get("n") || "file").replace(/[^\w. -]+/g, "_").slice(0, 100) || "file";
+    const headers = {
+      "Content-Type": type,
+      "Accept-Ranges": "bytes",
+      "Cache-Control": "private, max-age=31536000, immutable",
+      "X-Content-Type-Options": "nosniff",
+      "Content-Disposition": (attach ? "attachment" : "inline") + '; filename="' + asked + '"',
+    };
+    if (type === "application/pdf") Object.assign(headers, { "X-Frame-Options": "SAMEORIGIN", "Content-Security-Policy": "frame-ancestors 'self'" });
+    let start = 0;
+    let end = found.size - 1;
+    let status = 200;
+    const range = /^bytes=(\d*)-(\d*)$/.exec(String(req.headers.range || ""));
+    if (range && (range[1] || range[2])) {
+      start = range[1] ? Number(range[1]) : Math.max(0, found.size - Number(range[2]));
+      end = range[1] && range[2] ? Math.min(Number(range[2]), found.size - 1) : found.size - 1;
+      if (start > end || start >= found.size) {
+        res.writeHead(416, withSecurity({ "Content-Range": "bytes */" + found.size }));
+        res.end();
+        return;
       }
-      const base = roots[0] || found.dir;
-      const real = await fs.realpath(path.isAbsolute(want) ? want : path.join(base, want));
-      const root = roots.find((r) => r !== "/" && real.startsWith(r + path.sep));
-      if (!root || real.slice(root.length).split(path.sep).some((part) => part.startsWith("."))) throw new Error("outside");
-      const stat = await fs.stat(real);
-      if (!stat.isFile() || stat.size > 25 * 1024 * 1024) throw new Error("bad");
-      const body = await fs.readFile(real);
-      const e = ext.toLowerCase();
-      const type = e === "png" ? "image/png" : e === "webp" ? "image/webp" : e === "gif" ? "image/gif" : "image/jpeg";
-      res.writeHead(200, withSecurity({ "Content-Type": type, "Content-Length": body.length, "Cache-Control": "private, max-age=300", "X-Content-Type-Options": "nosniff" }));
-      res.end(body);
-    } catch {
-      sendJson(res, 404, { error: "Not found" });
+      status = 206;
+      headers["Content-Range"] = "bytes " + start + "-" + end + "/" + found.size;
     }
+    headers["Content-Length"] = end - start + 1;
+    res.writeHead(status, withSecurity(headers));
+    if (req.method === "HEAD") {
+      res.end();
+      return;
+    }
+    fsSync.createReadStream(found.file, { start, end }).on("error", () => res.destroy()).pipe(res);
     return;
   }
 

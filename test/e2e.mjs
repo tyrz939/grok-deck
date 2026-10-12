@@ -54,7 +54,7 @@ function widePng(width, height) {
 
 function paintedOverlaps(page) {
   return page.evaluate(() => {
-    const overlayOf = (el) => el.closest("#jump, #sheet, #setsheet, #confirm, #keys, #viewer, #update-note, #vv-debug, .picker");
+    const overlayOf = (el) => el.closest("#jump, #sheet, #setsheet, #confirm, #keys, #viewer, #docview, #update-note, #vv-debug, .picker");
     const clips = (value) => value === "auto" || value === "scroll" || value === "hidden" || value === "clip";
     const closedAway = (el) => {
       let node = el.parentElement;
@@ -1170,7 +1170,7 @@ try {
     await waitFor(async () => {
       const view = await session(id);
       const text = JSON.stringify(view.messages || []);
-      return !view.running && text.includes(pathToken) && text.includes("wide.png");
+      return !view.running && text.includes(pathToken) && text.includes("/api/media/");
     }, 20000, "wrap turn");
     const chrome = `${process.env.HOME}/.cache/ms-playwright/chromium-1243/chrome-linux64/chrome`;
     const browser = await chromium.launch({ headless: true, executablePath: fs.existsSync(chrome) ? chrome : undefined });
@@ -2326,6 +2326,57 @@ try {
   // The consistency pass, kept as a test so it stays true: on every screen, at 390 and 1440, light and dark, spacing is on
   // the scale, radii are from one set, icons are 18px with a 1.5px stroke, text has contrast 4:1 on its own background, no
   // two controls share a name, and a selected control does not look like the ones beside it.
+  // One chat that links to a file of every type: what the embeds checks and the consistency audit draw.
+  const WEBM = Buffer.from("GkXfo59ChoEBQveBAULygQRC84EIQoKEd2VibUKHgQJChYECGFOAZwEAAAAAAARSEU2bdLpNu4tTq4QVSalmU6yBoU27i1OrhBZUrmtTrIHWTbuMU6uEElTDZ1OsggEyTbuMU6uEHFO7a1OsggQ87AEAAAAAAABZAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAVSalmsCrXsYMPQkBNgIxMYXZmNjMuMS4xMDFXQYxMYXZmNjMuMS4xMDFEiYhAj0AAAAAAABZUrmvXrgEAAAAAAABO14EBc8WI3nm+V4FprjecgQAitZyDdW5kiIEAhoVWX1ZQOIOBASPjg4QCYloA4JCwgUC6gTCagQJVsIRVuYEBVe6BAOwBAAAAAAAAAgAAElTDZ/pzc59jwIBnyJlFo4dFTkNPREVSRIeMTGF2ZjYzLjEuMTAxc3PVY8CLY8WI3nm+V4FprjdnyKBFo4dFTkNPREVSRIeTTGF2YzYzLjEuMTAxIGxpYnZweGfIoUWjiERVUkFUSU9ORIeTMDA6MDA6MDEuMDAwMDAwMDAwAB9DtnVCheeBAKPCgQAAgJADAJ0BKkAAMAAARwiFhYiFhIgCAgJ1qgP4A/oCBzt54s8zHl4A/v1u8//jmTcwxP+Obf/xYTwOKMj/8VEAo5aBACgA0QEABRCsABgAGFgv9AAIjAAAo5aBAFAA0QEABRCsABgAGFgv9AAIjAAAo5aBAHgA0QEABRCsABgAGFgv9AAIjAAAo5aBAKAA0QEABRCsABgAGFgv9AAIjAAAo5aBAMgA0QEABRCsABgAGFgv9AAIjAAAo5aBAPAA0QEABRCsABgAGFgv9AAIjAAAo5WBARgAsQEABRAQFGAAYWC/0AAiMACjloEBQADRAQAFEKwAGAAYWC/0AAiMAACjloEBaADRAQAFEKwAGAAYWC/0AAiMAACjloEBkADRAQAFEKwAGAAYWC/0AAiMAACjloEBuADRAQAFEKwAGAAYWC/0AAiMAACjloEB4ADRAQAFEKwAGAAYWC/0AAiMAACjloECCADRAQAFEKwAGAAYWC/0AAiMAACjloECMADRAQAFEKwAGAAYWC/0AAiMAACjloECWADRAQAFEKwAGAAYWC/0AAiMAACjloECgADRAQAFEKwAGAAYWC/0AAiMAACjloECqADRAQAFEKwAGAAYWC/0AAiMAACjlYEC0ACxAQAFEBAUYABhYL/QACIwAKOWgQL4ANEBAAUQrAAYABhYL/QACIwAAKOWgQMgANEBAAUQrAAYABhYL/QACIwAAKOWgQNIANEBAAUQrAAYABhYL/QACIwAAKOWgQNwANEBAAUQrAAYABhYL/QACIwAAKOWgQOYANEBAAUQrAAYABhYL/QACIwAAKOWgQPAANEBAAUQrAAYABhYL/QACIwAABxTu2uRu4+zgQC3iveBAfGCAbHwgQM=", "base64");
+  const longMd = () => {
+    const rows = [];
+    for (let i = 1; i <= 12; i++) rows.push("| row " + i + " | " + "wide cell content ".repeat(6) + " | " + "x".repeat(60) + " | " + i * 1000 + " | notes for row " + i + " that keep going and going |");
+    const parts = ["# Release plan", "", "A long document. Its link: https://example.com/" + "a-very-long-unbroken-path/".repeat(8) + "end", ""];
+    for (let n = 1; n <= 14; n++) {
+      parts.push("## Section " + n, "", "Paragraph " + n + " with **bold**, *italic* and `inline code`. " + "More words to make the line wrap. ".repeat(5), "",
+        "- first point of " + n, "- second point of " + n, "", "> a quote in section " + n, "");
+      if (n % 3 === 0) parts.push("| Name | Detail | Hash | Count | Notes |", "| --- | --- | --- | ---: | --- |", ...rows.slice(0, 5), "");
+      if (n % 4 === 0) parts.push("```python", "def section_%d(values):".replace("%d", n), "    total = sum(v * 2 for v in values)  # a long comment line " + "that scrolls sideways ".repeat(6), "    return {'section': %d, 'total': total}".replace("%d", n), "```", "");
+    }
+    return parts.join("\n");
+  };
+  const makeEmbeds = async (name = "embeds") => {
+    await api("PATCH", "/api/skeptic/settings", { mode: "off" });
+    const dir = project(name);
+    fs.writeFileSync(path.join(dir, "pic.png"), widePng(120, 40));
+    fs.writeFileSync(path.join(dir, "clip.webm"), WEBM);
+    const wav = Buffer.alloc(44 + 8000);
+    wav.write("RIFF", 0); wav.writeUInt32LE(36 + 8000, 4); wav.write("WAVEfmt ", 8); wav.writeUInt32LE(16, 16); wav.writeUInt16LE(1, 20); wav.writeUInt16LE(1, 22);
+    wav.writeUInt32LE(8000, 24); wav.writeUInt32LE(8000, 28); wav.writeUInt16LE(1, 32); wav.writeUInt16LE(8, 34); wav.write("data", 36); wav.writeUInt32LE(8000, 40);
+    fs.writeFileSync(path.join(dir, "tone.wav"), wav);
+    fs.writeFileSync(path.join(dir, "spec.pdf"), "%PDF-1.1\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]>>endobj\ntrailer<</Root 1 0 R>>\n");
+    fs.writeFileSync(path.join(dir, "long.md"), longMd());
+    fs.writeFileSync(path.join(dir, "short.md"), "# Short\n\nOne **bold** line.\n");
+    fs.writeFileSync(path.join(dir, "tool.py"), "import os\n\n# a comment\ndef run(name):\n    return {'name': name, 'n': 42, 'ok': True}\n");
+    fs.writeFileSync(path.join(dir, "data.json"), JSON.stringify({ name: "deck", count: 3, ok: true, none: null }, null, 2) + "\n");
+    fs.writeFileSync(path.join(dir, "bundle.zip"), Buffer.alloc(3000, 7));
+    fs.writeFileSync(path.join(dir, "huge.mp4"), Buffer.alloc(26 * 1024 * 1024));
+    const say = [
+      "Everything is below.", "",
+      "![a picture](pic.png)", "",
+      "[the clip](clip.webm)", "",
+      "[the tone](tone.wav)", "",
+      "[the spec](spec.pdf)", "",
+      "[the plan](long.md)", "",
+      "[short note](short.md)", "",
+      "[the tool](tool.py)", "",
+      "[the data](data.json)", "",
+      "[the bundle](bundle.zip)", "",
+      "[the big one](huge.mp4)", "",
+      "[lost](lost.pdf)", "",
+      path.join(dir, "short.md"),
+    ].join("\n");
+    const created = await api("POST", "/api/turns", { cwd: dir, prompt: "[[say " + say + "]]", permissionMode: "default", skeptic: "off" });
+    assert.equal(created.status, 200, JSON.stringify(created.json));
+    await idle(created.json.sessionId);
+    return { id: created.json.sessionId, dir };
+  };
+
   await check("consistency: spacing, radii, icons, contrast, duplicates and active states on every screen", async () => {
     const dir = project("audit");
     const made = [];
@@ -2337,6 +2388,7 @@ try {
       cwd: dir, prompt: "[[run echo hello]][[write notes.txt a]][[say Done. Snippet:\n\n```js\nconst answer = 42;\n```\n\n- one\n- two]]", permissionMode: "default", skeptic: "off",
     });
     for (const id of [...made, richAudit.json.sessionId]) await idle(id);
+    const embedsAudit = await makeEmbeds("audit-embeds");
     const askAudit = await api("POST", "/api/turns", { cwd: dir, prompt: "[[perm]]", permissionMode: "default", skeptic: "off" });
     await waitFor(async () => (await session(askAudit.json.sessionId)).running, 5000, "approval turn");
     const chromium = await loadChromium("audit");
@@ -2473,6 +2525,15 @@ try {
           await page.locator(".steps summary, .steps").first().click().catch(() => {});
           await page.waitForTimeout(400);
           await scan("rich chat");
+          await page.goto(BASE + "/s/" + embedsAudit.id, { waitUntil: "domcontentloaded" });
+          await page.waitForSelector(".embed-doc .embed-name");
+          await page.locator(".embed-doc > summary").evaluateAll((list) => list.forEach((el) => { if (!el.parentElement.open) el.click(); }));
+          await page.waitForSelector(".md-doc table");
+          await scan("embeds");
+          await page.locator(".embed-doc .embed-btn[aria-label^='Open long.md']").click();
+          await page.waitForSelector("#docview:not([hidden]) .md-doc");
+          await scan("document full screen");
+          await page.locator("#docview .docview-close").click();
           await page.goto(BASE + "/s/" + askAudit.json.sessionId, { waitUntil: "domcontentloaded" });
           await page.waitForSelector(".perm, .toolcard.asking", { timeout: 8000 }).catch(() => {});
           await page.waitForTimeout(400);
@@ -2498,6 +2559,338 @@ try {
     await api("POST", "/api/sessions/" + askAudit.json.sessionId + "/cancel", {}).catch(() => {});
     const lines = [...found.entries()].map(([key, where]) => key + "   <- " + [...where].slice(0, 4).join(" | ") + (where.size > 4 ? " +" + (where.size - 4) : "")).sort();
     assert.deepEqual(lines, [], "inconsistent:\n" + lines.join("\n"));
+  });
+
+  await check("images: a picture moved after the reply still renders, a missing one shows a card, and only the store is served", async () => {
+    await api("PATCH", "/api/skeptic/settings", { mode: "off" });
+    const dir = project("media");
+    fs.writeFileSync(path.join(dir, "keep.png"), widePng(60, 20));
+    fs.writeFileSync(path.join(dir, "later.png"), widePng(80, 20));
+    const created = await api("POST", "/api/turns", {
+      cwd: dir,
+      prompt: "[[say Here ![keep](keep.png) and ![later](later.png) and ![never](never.png)]][[sleep 1500]][[mv later.png gone.png]]",
+      permissionMode: "default",
+    });
+    assert.equal(created.status, 200, JSON.stringify(created.json));
+    const id = created.json.sessionId;
+    // While the turn runs, the references are already the stable URLs: copied before the agent moved anything.
+    await waitFor(async () => {
+      const view = await session(id);
+      const text = (view.messages.find((m) => m.role === "assistant") || {}).text || "";
+      return view.running && /\(\/api\/media\/[0-9a-f]{64}\.png(?:\?[^)]*)?\)/.test(text) && text.includes("(never.png)");
+    }, 8000, "references rewritten while the turn runs");
+    await idle(id);
+    // The agent now moves and deletes what is left, after the reply.
+    fs.renameSync(path.join(dir, "keep.png"), path.join(dir, "elsewhere.png"));
+    assert.ok(!fs.existsSync(path.join(dir, "later.png")) && !fs.existsSync(path.join(dir, "keep.png")));
+    const view = await session(id);
+    const text = view.messages.find((m) => m.role === "assistant").text;
+    const urls = [...text.matchAll(/\(\/api\/media\/([0-9a-f]{64}\.png)(?:\?[^)]*)?\)/g)].map((m) => m[1]);
+    assert.equal(urls.length, 2, text);
+    assert.match(text, /\(never\.png\)/);
+    for (const name of urls) {
+      const got = await fetch(BASE + "/api/media/" + name, { headers: { Cookie: cookie } });
+      assert.equal(got.status, 200);
+      assert.equal(got.headers.get("content-type"), "image/png");
+    }
+    assert.ok(fs.readdirSync(path.join(tmp, "data", "media")).filter((f) => f.endsWith(".png")).length >= 2);
+    assert.equal((await fetch(BASE + "/api/media/" + urls[0])).status, 401, "the store needs the login");
+    assert.equal((await fetch(BASE + "/api/media/" + "0".repeat(64) + ".png", { headers: { Cookie: cookie } })).status, 404);
+    assert.equal((await fetch(BASE + "/api/media/..%2Findex.json", { headers: { Cookie: cookie } })).status, 404);
+    // The old routes that read the working folder are gone: nothing is served but the store.
+    assert.equal((await api("GET", "/api/sessions/" + id + "/file?p=" + encodeURIComponent("elsewhere.png"))).status, 404);
+    assert.equal((await api("GET", "/api/sessions/" + id + "/image/a.png")).status, 404);
+    const chromium = await loadChromium("media");
+    if (!chromium) return;
+    const browser = await launchChromium(chromium);
+    try {
+      const token = cookie.split("=")[1];
+      for (const [width, height] of [[390, 844], [1440, 900]]) {
+        const page = await browser.newPage({ viewport: { width, height }, deviceScaleFactor: 1 });
+        await page.context().addCookies([{ name: "gm_session", value: token, url: BASE, httpOnly: true, sameSite: "Strict" }]);
+        await page.goto(BASE + "/s/" + id, { waitUntil: "domcontentloaded" });
+        await page.waitForSelector(".msg.assistant .md-missing");
+        await page.waitForFunction(() => [...document.querySelectorAll(".msg.assistant img")].every((img) => img.complete) && document.querySelectorAll(".msg.assistant img").length === 2);
+        const seen = await page.evaluate(() => ({
+          loaded: [...document.querySelectorAll(".msg.assistant img")].map((img) => img.naturalWidth),
+          cards: [...document.querySelectorAll(".msg.assistant .md-missing")].map((el) => el.textContent),
+          broken: [...document.querySelectorAll("#main img")].filter((img) => img.complete && img.naturalWidth === 0).map((img) => img.outerHTML.slice(0, 120)),
+        }));
+        assert.deepEqual(seen.loaded, [60, 80], "both pictures render from the store");
+        assert.equal(seen.cards.length, 1);
+        assert.match(seen.cards[0], /Image moved or deleted/);
+        assert.match(seen.cards[0], /never/);
+        assert.deepEqual(seen.broken, [], "no broken box");
+        assert.deepEqual(await paintedOverlaps(page), [], "no overlaps at " + width);
+        if (width === 390) await page.screenshot({ path: path.join(SHOTS, "chat-media-390.png") });
+        await page.close();
+      }
+      // A store file that is gone later is the same card, not a broken box.
+      fs.rmSync(path.join(tmp, "data", "media", urls[0]));
+      const page = await browser.newPage({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 1 });
+      await page.context().addCookies([{ name: "gm_session", value: token, url: BASE, httpOnly: true, sameSite: "Strict" }]);
+      await page.goto(BASE + "/s/" + id, { waitUntil: "domcontentloaded" });
+      await page.waitForFunction(() => document.querySelectorAll(".msg.assistant .md-missing").length >= 2);
+      assert.equal(await page.locator(".msg.assistant img").count(), 1);
+      await page.close();
+    } finally {
+      await browser.close();
+    }
+  });
+
+  let embeds = null;
+  const embedPage = async (browser, width, height, appearance = "dark") => {
+    const page = await browser.newPage({ viewport: { width, height }, deviceScaleFactor: 1 });
+    await page.context().addCookies([{ name: "gm_session", value: cookie.split("=")[1], url: BASE, httpOnly: true, sameSite: "Strict" }]);
+    await page.addInitScript((mode) => localStorage.setItem("gm-appearance", mode), appearance);
+    await page.goto(BASE + "/s/" + embeds.id, { waitUntil: "domcontentloaded" });
+    await page.waitForSelector(".msg.assistant .embed-card");
+    return page;
+  };
+  const noSideScroll = (page) => page.evaluate(() => ({
+    page: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+    main: document.querySelector("#main").scrollWidth - document.querySelector("#main").clientWidth,
+    cards: [...document.querySelectorAll(".embed-card, .md-missing")].filter((c) => c.getBoundingClientRect().right > document.querySelector("#main").getBoundingClientRect().right + 1).length,
+  }));
+
+  await check("embeds: every kind of file a message links to is copied into the store and its reference rewritten", async () => {
+    embeds = await makeEmbeds();
+    await waitFor(async () => (await session(embeds.id)).messages.some((m) => m.role === "assistant" && m.text.includes("/api/media/")), 15000, "embeds reply");
+    const text = (await session(embeds.id)).messages.find((m) => m.role === "assistant").text;
+    const link = (label) => new RegExp("\\[" + label + "\\]\\((/api/media/[0-9a-f]{64}\\.([a-z0-9]+))\\?n=([^)]+)\\)").exec(text);
+    const want = { "a picture": "png", "the clip": "webm", "the tone": "wav", "the spec": "pdf", "the plan": "md", "short note": "md", "the tool": "py", "the data": "json", "the bundle": "zip" };
+    for (const [label, ext] of Object.entries(want)) {
+      const m = link(label.replace(/ /g, " "));
+      assert.ok(m || (label === "a picture" && /!\[a picture\]\(\/api\/media\/[0-9a-f]{64}\.png\?n=pic\.png\)/.test(text)), "rewritten: " + label + "\n" + text);
+      if (m) assert.equal(m[2], ext);
+    }
+    assert.match(text, /^\[short\.md\]\(\/api\/media\/[0-9a-f]{64}\.md\?n=short\.md\)$/m, "a path alone on its line becomes a link to the stored file");
+    assert.match(text, /\[the big one\]\(\/api\/media\/limit\?size=\d+&n=huge\.mp4\)/, "over the cap: no copy, and the reference says so");
+    assert.match(text, /\[lost\]\(lost\.pdf\)/, "a missing file stays as written");
+    const get = async (label, init = {}) => {
+      const m = link(label);
+      return fetch(BASE + m[1], { ...init, headers: { Cookie: cookie, ...(init.headers || {}) } });
+    };
+    assert.equal((await get("the spec")).headers.get("content-type"), "application/pdf");
+    assert.equal((await get("the spec")).headers.get("x-frame-options"), "SAMEORIGIN", "the PDF can sit in our own frame");
+    assert.match((await get("the plan")).headers.get("content-type"), /^text\/plain/);
+    assert.match((await get("the tool")).headers.get("content-type"), /^text\/plain/);
+    const zip = await get("the bundle");
+    assert.equal(zip.headers.get("content-type"), "application/octet-stream");
+    assert.match(zip.headers.get("content-disposition"), /^attachment/);
+    assert.equal((await get("the clip")).headers.get("content-type"), "video/webm");
+    const ranged = await get("the clip", { headers: { Range: "bytes=0-99" } });
+    assert.equal(ranged.status, 206, "video needs Range requests to play on iOS");
+    assert.equal((await ranged.arrayBuffer()).byteLength, 100);
+    assert.match(ranged.headers.get("content-range"), /^bytes 0-99\/\d+$/);
+    assert.equal((await get("the clip", { method: "HEAD" })).status, 200);
+    const stored = fs.readdirSync(path.join(tmp, "data", "media"));
+    assert.ok(!stored.some((f) => fs.statSync(path.join(tmp, "data", "media", f)).size > 25 * 1024 * 1024), "nothing over the cap was copied");
+  });
+
+  await check("embeds: a picture, a video and audio draw inline with native players, and a PDF previews with full screen", async () => {
+    const chromium = await loadChromium("embeds media");
+    if (!chromium) return;
+    const browser = await launchChromium(chromium);
+    try {
+      for (const [width, height] of [[390, 844], [1440, 900]]) {
+        const page = await embedPage(browser, width, height);
+        const seen = await page.evaluate(() => ({
+          image: [...document.querySelectorAll(".msg.assistant .md-shot img")].map((i) => ({ w: i.naturalWidth, src: i.getAttribute("src").split("?")[0].endsWith(".png") })),
+          video: [...document.querySelectorAll(".msg.assistant video")].map((v) => ({ controls: v.controls, src: v.getAttribute("src").endsWith(".webm"), inline: v.playsInline })),
+          audio: [...document.querySelectorAll(".msg.assistant audio")].map((a) => ({ controls: a.controls, src: a.getAttribute("src").endsWith(".wav") })),
+          pdf: [...document.querySelectorAll(".msg.assistant iframe.embed-frame")].map((f) => f.getAttribute("src").endsWith(".pdf")),
+        }));
+        await page.waitForFunction(() => document.querySelector(".msg.assistant .md-shot img")?.complete);
+        assert.deepEqual(seen.video, [{ controls: true, src: true, inline: true }]);
+        assert.deepEqual(seen.audio, [{ controls: true, src: true }]);
+        assert.deepEqual(seen.pdf, [true]);
+        assert.equal(seen.image.length, 1);
+        assert.ok(seen.image[0].src);
+        await page.waitForFunction(() => document.querySelector(".embed-video .embed-meta")?.textContent.length > 0);
+        assert.match(await page.locator(".embed-pdf .embed-name").textContent(), /spec\.pdf/);
+        assert.deepEqual(await noSideScroll(page), { page: 0, main: 0, cards: 0 }, "nothing leaves the page at " + width);
+        assert.deepEqual(await paintedOverlaps(page), [], "no overlaps at " + width);
+        // The preview opens full screen, and closes with the button and with Escape.
+        await page.locator(".embed-pdf .embed-btn[aria-label^='Open spec.pdf']").scrollIntoViewIfNeeded();
+        await page.locator(".embed-pdf .embed-btn[aria-label^='Open spec.pdf']").click();
+        await page.waitForSelector("#docview:not([hidden]) iframe.docview-frame");
+        assert.match(await page.locator("#docview .docview-name").textContent(), /spec\.pdf/);
+        const box = await page.locator("#docview").boundingBox();
+        assert.ok(box.width >= width - 1 && box.height >= height - 1, "full screen");
+        await page.keyboard.press("Escape");
+        await page.waitForSelector("#docview", { state: "hidden" });
+        if (width === 390) {
+          await page.locator(".msg.assistant").first().evaluate((el) => el.scrollIntoView({ block: "start" }));
+          await page.waitForTimeout(400);
+          await page.screenshot({ path: path.join(SHOTS, "embeds-390.png") });
+        }
+        await page.close();
+      }
+    } finally {
+      await browser.close();
+    }
+  });
+
+  await check("embeds: a long Markdown file is a collapsible document card with tables, code blocks, raw source and full screen", async () => {
+    const chromium = await loadChromium("embeds markdown");
+    if (!chromium) return;
+    const browser = await launchChromium(chromium);
+    try {
+      for (const [width, height] of [[390, 844], [1440, 900]]) {
+        const page = await embedPage(browser, width, height);
+        const card = page.locator(".embed-doc", { has: page.locator(".embed-name", { hasText: "long.md" }) });
+        await card.waitFor();
+        await page.waitForFunction(() => [...document.querySelectorAll(".embed-doc")].find((c) => c.textContent.includes("long.md"))?.querySelector(".embed-meta")?.textContent.length > 0);
+        assert.equal(await card.evaluate((el) => el.open), false, "a long document starts collapsed");
+        assert.equal(await page.locator(".embed-doc", { has: page.locator(".embed-name", { hasText: "short.md" }) }).first().evaluate((el) => el.open), true, "a short one starts open");
+        await card.locator("> summary").click();
+        assert.equal(await card.evaluate((el) => el.open), true);
+        const doc = card.locator(".md-doc");
+        await doc.waitFor();
+        const shape = await doc.evaluate((el) => ({
+          h1: el.querySelectorAll("h1").length, h2: el.querySelectorAll("h2").length, tables: el.querySelectorAll(".table-wrap table").length,
+          code: el.querySelectorAll(".code pre code").length, copy: el.querySelectorAll(".code .copy").length, bold: el.querySelectorAll("strong").length,
+          link: [...el.querySelectorAll("a")].length,
+        }));
+        assert.equal(shape.h1, 1);
+        assert.equal(shape.h2, 14);
+        assert.ok(shape.tables >= 4 && shape.code >= 3 && shape.copy === shape.code && shape.bold > 5, JSON.stringify(shape));
+        // The long URL wraps and the wide tables and code scroll in their own boxes: the page never gets wider.
+        assert.deepEqual(await noSideScroll(page), { page: 0, main: 0, cards: 0 }, "nothing leaves the page at " + width);
+        const inner = await card.locator(".embed-body").evaluate((el) => ({ scroll: el.scrollWidth - el.clientWidth, table: [...el.querySelectorAll(".table-wrap")].some((t) => t.scrollWidth > t.clientWidth) }));
+        assert.ok(inner.scroll <= 1, "the document wraps: " + JSON.stringify(inner));
+        if (width === 390) assert.equal(inner.table, true, "a wide table scrolls inside its own box");
+        assert.deepEqual(await paintedOverlaps(page), [], "no overlaps at " + width);
+        // Copy works in a code block of the document.
+        await card.locator(".code .copy").first().scrollIntoViewIfNeeded();
+        await card.locator(".code .copy").first().click();
+        await page.waitForFunction(() => document.querySelector(".embed-doc .code .copy")?.getAttribute("aria-label") !== "Copy code");
+        // Raw source and back.
+        await card.getByRole("button", { name: "Raw" }).click();
+        const raw = await card.locator(".embed-code").textContent();
+        assert.ok(raw.startsWith("# Release plan") && raw.includes("| Name | Detail |"), "the raw source");
+        assert.equal(await card.locator(".md-doc").count(), 0);
+        await card.getByRole("button", { name: "Rendered" }).click();
+        await card.locator(".md-doc").waitFor();
+        // Full screen: the same renderer, its own toggle, closable.
+        await card.locator(".embed-btn[aria-label^='Open long.md']").scrollIntoViewIfNeeded();
+        await card.locator(".embed-btn[aria-label^='Open long.md']").click();
+        await page.waitForSelector("#docview:not([hidden]) .md-doc table");
+        assert.deepEqual(await noSideScroll(page), { page: 0, main: 0, cards: 0 });
+        await page.locator("#docview .docview-body").evaluate((el) => { el.scrollTop = 600; });
+        await page.waitForTimeout(250);
+        if (width === 390) await page.screenshot({ path: path.join(SHOTS, "md-view-390.png") });
+        await page.locator("#docview").getByRole("button", { name: "Raw" }).click();
+        assert.ok((await page.locator("#docview .embed-code").textContent()).startsWith("# Release plan"));
+        await page.locator("#docview .docview-close").click();
+        await page.waitForSelector("#docview", { state: "hidden" });
+        await card.locator("> summary").click();
+        assert.equal(await card.evaluate((el) => el.open), false, "collapsible");
+        await page.close();
+      }
+    } finally {
+      await browser.close();
+    }
+  });
+
+  await check("embeds: code and data are highlighted, other files are download cards, too large and missing files say so", async () => {
+    const chromium = await loadChromium("embeds files");
+    if (!chromium) return;
+    const browser = await launchChromium(chromium);
+    try {
+      for (const [width, height] of [[390, 844], [1440, 900]]) {
+        const page = await embedPage(browser, width, height);
+        const py = page.locator(".embed-doc", { has: page.locator(".embed-name", { hasText: "tool.py" }) });
+        await py.locator(".embed-code .tok-key").first().waitFor();
+        assert.deepEqual(await py.locator(".embed-code .tok-key").allTextContents().then((l) => [...new Set(l)].sort()), ["True", "def", "import", "return"]);
+        assert.ok((await py.locator(".embed-code .tok-com").allTextContents()).some((t) => t.includes("a comment")));
+        assert.ok((await py.locator(".embed-code .tok-num").allTextContents()).includes("42"));
+        const json = page.locator(".embed-doc", { has: page.locator(".embed-name", { hasText: "data.json" }) });
+        await json.locator(".embed-code .tok-str").first().waitFor();
+        assert.ok((await json.locator(".embed-code .tok-key").allTextContents()).includes("true"));
+        const mono = await py.locator(".embed-code code").evaluate((el) => getComputedStyle(el).fontFamily);
+        assert.match(mono, /mono|menlo|consolas|courier/i);
+        const zip = page.locator("a.embed-file");
+        assert.match(await zip.textContent(), /bundle\.zip/);
+        await page.waitForFunction(() => /KB|B$/.test(document.querySelector("a.embed-file .embed-meta")?.textContent || ""), null, { timeout: 5000 }).catch(async () => { throw new Error("file size never shown: " + (await page.locator("a.embed-file").evaluate((el) => el.outerHTML))); });
+        assert.match(await zip.getAttribute("href"), /^\/api\/media\/[0-9a-f]{64}\.zip\?download=1&n=bundle\.zip$/);
+        assert.equal(await zip.getAttribute("download"), "bundle.zip");
+        const notes = await page.locator(".msg.assistant .md-missing").evaluateAll((list) => list.map((el) => el.textContent));
+        assert.equal(notes.length, 2);
+        assert.ok(notes.some((t) => /File too large to keep/.test(t) && /huge\.mp4/.test(t) && /26 MB/.test(t) && /25 MB/.test(t)), JSON.stringify(notes));
+        assert.ok(notes.some((t) => /File moved or deleted/.test(t) && /lost/.test(t)), JSON.stringify(notes));
+        assert.deepEqual(await noSideScroll(page), { page: 0, main: 0, cards: 0 }, "nothing leaves the page at " + width);
+        assert.deepEqual(await paintedOverlaps(page), [], "no overlaps at " + width);
+        await page.close();
+      }
+      // A store file that vanishes later is the same card as a missing source.
+      const gone = fs.readdirSync(path.join(tmp, "data", "media")).find((f) => f.endsWith(".zip"));
+      fs.rmSync(path.join(tmp, "data", "media", gone));
+      fs.rmSync(path.join(embeds.dir, "bundle.zip")); // while the original is still there, the store copy is made again
+      const page = await embedPage(browser, 390, 844);
+      await page.waitForFunction(() => document.querySelectorAll(".msg.assistant .md-missing").length === 3, null, { timeout: 6000 }).catch(async () => {
+        throw new Error("cards: " + JSON.stringify(await page.evaluate(() => [...document.querySelectorAll(".msg.assistant .embed-card, .msg.assistant .md-missing")].map((el) => el.className + ":" + el.textContent.slice(0, 40)))));
+      });
+      assert.equal(await page.locator("a.embed-file").count(), 0, "no download card for a file the store no longer has");
+      await page.close();
+    } finally {
+      await browser.close();
+    }
+  });
+
+  await check("one answer per turn: earlier assistant messages fold into the steps by position, live ones stay until superseded", async () => {
+    await api("PATCH", "/api/skeptic/settings", { mode: "off" });
+    const dir = project("fold");
+    const created = await api("POST", "/api/turns", {
+      cwd: dir,
+      prompt: "[[say First take]][[sleep 2500]][[exec 0 echo a]][[say Second take]][[sleep 2500]][[exec 0 echo b]][[say Final answer]]",
+      permissionMode: "default",
+    });
+    assert.equal(created.status, 200, JSON.stringify(created.json));
+    const id = created.json.sessionId;
+    const chromium = await loadChromium("fold");
+    if (!chromium) {
+      await idle(id);
+      return;
+    }
+    const browser = await launchChromium(chromium);
+    try {
+      const token = cookie.split("=")[1];
+      const page = await browser.newPage({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 1 });
+      await page.context().addCookies([{ name: "gm_session", value: token, url: BASE, httpOnly: true, sameSite: "Strict" }]);
+      await page.goto(BASE + "/s/" + id, { waitUntil: "domcontentloaded" });
+      const answers = () => page.evaluate(() => [...document.querySelectorAll("#main .msg.assistant")].filter((el) => !el.closest(".steps-body")).map((el) => el.textContent.trim()));
+      const folded = () => page.evaluate(() => [...document.querySelectorAll("#main .steps-body .msg.assistant")].map((el) => el.textContent.trim()));
+      // Live: the first message is on screen as it arrives and stays until a newer one comes.
+      await page.waitForFunction(() => [...document.querySelectorAll("#main .msg.assistant")].some((el) => el.textContent.includes("First take")));
+      assert.deepEqual(await answers(), ["First take"]);
+      assert.deepEqual(await folded(), []);
+      // The second arrives: the first folds into the steps, the second shows normally.
+      await page.waitForFunction(() => [...document.querySelectorAll("#main .msg.assistant")].some((el) => el.textContent.includes("Second take")));
+      assert.deepEqual(await answers(), ["Second take"]);
+      assert.deepEqual(await folded(), ["First take"]);
+      await idle(id);
+      await page.waitForFunction(() => document.querySelectorAll("#main .steps-body .msg.assistant").length === 2);
+      // Turn end: only the last message is the answer card; the others are reachable in the steps row.
+      assert.deepEqual(await answers(), ["Final answer"]);
+      assert.deepEqual(await folded(), ["First take", "Second take"]);
+      const label = await page.locator("#main .steps-count").first().textContent();
+      assert.match(label, /2 earlier messages/);
+      assert.match(label, /2 steps/);
+      await page.reload({ waitUntil: "domcontentloaded" });
+      await page.waitForSelector("#main .steps");
+      assert.deepEqual(await answers(), ["Final answer"], "the same after a reload from disk");
+      await page.locator("#main .steps > summary").first().click();
+      assert.deepEqual(await folded(), ["First take", "Second take"]);
+      assert.deepEqual(await paintedOverlaps(page), []);
+      await page.locator("#main .steps").first().evaluate((el) => el.scrollIntoView({ block: "start" }));
+      await page.waitForTimeout(250);
+      await page.screenshot({ path: path.join(SHOTS, "chat-fold-390.png") });
+      await page.close();
+    } finally {
+      await browser.close();
+    }
   });
 
   await check("consistency shots: every screen, 390 and 1440, light and dark", async () => {

@@ -11,7 +11,7 @@ import { applyEvent, extractImages, plainText } from "../public/reduce.js";
 import { copyText } from "../public/clipboard.js";
 import { composerAction, hasComposerContent } from "../public/composer.js";
 import { applyReasoning, longRunActive, modeChoice, reasoningChoice, reasoningChipText, ULTRA_HELP } from "../public/options.js";
-import { renderMarkdown, setImageSession } from "../public/markdown.js";
+import { findRefs, parseMedia, renderMarkdown, rewriteRefs } from "../public/markdown.js";
 import { accountBody, createBillingCache, parseBilling, planUsageLabel } from "../lib/billing.js";
 import { lastMessageSnippet } from "../lib/sessions.js";
 import { hasDone, intervalLabel, parseInterval, parseLoopCommand, runLabel, validateLoop } from "../lib/loops.js";
@@ -612,12 +612,23 @@ test("markdown tables scroll in their own box and fences stay code", () => {
   assert.match(html, /<p>Before the table\.<\/p>/);
   assert.match(html, /<p>After\.<\/p>/);
   assert.doesNotMatch(html, /<p>[^<]*\| Name/);
-  setImageSession("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
-  const img = renderMarkdown("![wide](wide.png)");
+  const stored = "/api/media/" + "a".repeat(64) + ".png";
+  const img = renderMarkdown("![wide](" + stored + ")");
   assert.match(img, /class="shots md-shot"/);
-  assert.match(img, /src="\/api\/sessions\/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\/file\?p=wide\.png"/);
-  setImageSession("");
-  assert.equal(renderMarkdown("![wide](wide.png)"), "<p>![wide](wide.png)</p>");
+  assert.match(img, new RegExp('src="' + stored.replaceAll("/", "\\/") + '"'));
+  // A local path still in the text means the source was gone when the message arrived: a card, never a broken box.
+  const gone = renderMarkdown("![wide](wide.png)");
+  assert.match(gone, /class="md-missing"/);
+  assert.match(gone, /Image moved or deleted/);
+  assert.doesNotMatch(gone, /<img/);
+  assert.match(renderMarkdown("![x](https://example.com/a.png)"), /<a href="https:\/\/example\.com\/a\.png"/);
+});
+
+test("image references are found and rewritten by position, outside code", () => {
+  const text = "a ![x](images/a.png) `![no](b.png)`\n```\n![no2](c.png)\n```\n![y](</tmp/d e.png>) ![z](https://x/y.png)";
+  assert.deepEqual(findRefs(text).map((t) => t.target), ["images/a.png", "</tmp/d e.png>", "https://x/y.png"]);
+  const out = rewriteRefs(text, new Map([["images/a.png", "/api/media/h.png"]]));
+  assert.equal(out, text.replace("images/a.png", "/api/media/h.png"));
 });
 
 test("composer action slot: Send / Stop / Send now swap (images count as content)", () => {
@@ -844,4 +855,73 @@ test("plan quota percent comes from billing config, not from session totals", as
   fail = false;
   assert.equal((await down.get()).label, "1% this month");
   assert.equal(fails, 2);
+});
+
+test("media store: any local file a message links to is copied once, survives its source moving, and only files in the folder are taken", async () => {
+  const fs = await import("node:fs/promises");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const data = await fs.mkdtemp(path.join(os.tmpdir(), "gm-media-"));
+  const work = await fs.mkdtemp(path.join(os.tmpdir(), "gm-work-"));
+  const outside = await fs.mkdtemp(path.join(os.tmpdir(), "gm-out-"));
+  process.env.DATA_DIR = data;
+  const media = await import("../lib/media.js?" + Date.now());
+  const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64");
+  await fs.writeFile(path.join(work, "shot.png"), png);
+  await fs.writeFile(path.join(work, "fake.png"), "not an image at all");
+  await fs.writeFile(path.join(work, "notes.md"), "# Notes\n\n| a | b |\n| - | - |\n| 1 | 2 |\n");
+  await fs.writeFile(path.join(work, "report.pdf"), "%PDF-1.4 fake");
+  await fs.writeFile(path.join(work, ".secret.txt"), "hidden");
+  await fs.writeFile(path.join(outside, "secret.png"), png);
+  await fs.writeFile(path.join(outside, "secret.md"), "outside");
+  const session = { cwd: work, dir: work };
+  const text = [
+    "Here: ![shot](shot.png) and ![fake](fake.png) and [out](" + path.join(outside, "secret.md") + ") and ![gone](nope.png)",
+    "[the report](report.pdf) and [dot](.secret.txt)",
+    path.join(work, "notes.md"),
+    "see notes.md in prose",
+  ].join("\n");
+  const first = await media.internMessages([{ role: "assistant", text }], "s1", session);
+  const out = first[0].text;
+  assert.match(out, /!\[shot\]\(\/api\/media\/[0-9a-f]{64}\.png\?n=shot\.png\)/);
+  assert.match(out, /\[the report\]\(\/api\/media\/[0-9a-f]{64}\.pdf\?n=report\.pdf\)/);
+  assert.match(out, /^\[notes\.md\]\(\/api\/media\/[0-9a-f]{64}\.md\?n=notes\.md\)$/m, "a path alone on its line becomes a link to the stored file");
+  assert.match(out, /!\[fake\]\(fake\.png\)/); // not an image: left as written
+  assert.match(out, /!\[gone\]\(nope\.png\)/); // missing: left as written
+  assert.ok(out.includes("](" + path.join(outside, "secret.md") + ")"), "outside the folder is never read");
+  assert.ok(out.includes("[dot](.secret.txt)"), "a dot file is never read");
+  assert.ok(out.endsWith("see notes.md in prose"), "a path inside prose is not an embed");
+  assert.equal((await fs.readdir(data + "/media")).filter((n) => /^[0-9a-f]{64}\./.test(n)).length, 3);
+  // The agent moves the files; the same message read back still points at the stored copies.
+  await fs.rename(path.join(work, "shot.png"), path.join(work, "moved.png"));
+  await fs.rm(path.join(work, "report.pdf"));
+  const again = await media.internMessages([{ role: "assistant", text }], "s1", session);
+  assert.equal(again[0].text, out);
+  const [, name] = /\/api\/media\/([0-9a-f]{64}\.png)/.exec(out);
+  assert.deepEqual((await fs.readFile((await media.statMedia(name)).file)), png);
+  assert.equal(await media.statMedia("../index.json"), null);
+  assert.equal(media.mediaType(name), "image/png");
+  assert.equal(media.mediaType("a".repeat(64) + ".md"), "text/plain; charset=utf-8");
+  assert.equal(media.mediaType("a".repeat(64) + ".html"), "text/plain; charset=utf-8", "a page never runs from the store");
+  assert.equal(media.mediaType("a".repeat(64) + ".zip"), "application/octet-stream");
+  // Over the cap: not copied, and the reference says how big it was.
+  await fs.writeFile(path.join(work, "big.mp4"), Buffer.alloc(media.MAX_FILE + 1));
+  const big = await media.internTarget("big.mp4", session);
+  assert.match(big, /^\/api\/media\/limit\?size=\d+&n=big\.mp4$/);
+  assert.match(renderMarkdown("[v](" + big + ")"), /File too large to keep/);
+});
+
+test("stored files render by type, and documents keep their own text out of the chat's embeds", () => {
+  const h = "a".repeat(64);
+  const embed = (ext, n) => renderMarkdown("[x](/api/media/" + h + "." + ext + "?n=" + n + ")");
+  assert.match(embed("pdf", "r.pdf"), /data-kind="pdf" data-name="r\.pdf"/);
+  assert.match(embed("mp4", "v.mp4"), /data-kind="video"/);
+  assert.match(embed("mp3", "a.mp3"), /data-kind="audio"/);
+  assert.match(embed("md", "n.md"), /data-kind="markdown"/);
+  assert.match(embed("py", "a.py"), /data-kind="code"/);
+  assert.match(embed("zip", "a.zip"), /data-kind="file"/);
+  assert.match(embed("png", "a.png"), /class="shots md-shot"/);
+  assert.match(renderMarkdown("[x](/gone/a.zip)"), /File moved or deleted/);
+  assert.equal(renderMarkdown("[x](/gone/a.zip)", { embeds: false }), "<p>x</p>");
+  assert.equal(parseMedia("/api/media/" + h + ".md?n=n.md").label, "n.md");
 });

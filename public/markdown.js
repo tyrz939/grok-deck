@@ -6,24 +6,158 @@ function escapeHtml(value) {
     .replace(/"/g, "&quot;");
 }
 
-let imageSession = "";
+// Files an assistant message points at are served only from the media store (lib/media.js). The server copies a
+// local file the message links to into the store when the message arrives and rewrites the reference to
+// /api/media/<sha256>.<ext>?n=<name>. A local reference still in the text means the source was already gone.
+export const MEDIA_PREFIX = "/api/media/";
+export const LIMIT_PATH = "/api/media/limit";
+const HAS_EXT = /\.([A-Za-z0-9]{1,8})$/;
 
-// Grok saves generated images in its session folder and links them as images/<file>.
-export function setImageSession(id) {
-  imageSession = /^[0-9a-f-]{36}$/i.test(id || "") ? id : "";
+const KINDS = {
+  image: ["png", "jpg", "jpeg", "webp", "gif"],
+  video: ["mp4", "webm", "mov", "m4v"],
+  audio: ["mp3", "wav", "ogg", "m4a", "aac", "flac", "opus"],
+  pdf: ["pdf"],
+  markdown: ["md", "markdown"],
+  code: ["txt", "log", "csv", "tsv", "json", "js", "mjs", "cjs", "ts", "tsx", "jsx", "py", "sh", "bash", "zsh", "css", "html", "htm", "xml", "svg", "yml", "yaml", "toml", "ini", "rs", "go", "java", "c", "h", "cpp", "hpp", "rb", "php", "sql", "swift", "kt", "diff", "patch"],
+};
+const KIND_OF = new Map(Object.entries(KINDS).flatMap(([kind, list]) => list.map((ext) => [ext, kind])));
+
+// How a stored file is shown: by its type. Anything unknown is a download card.
+export function embedKind(ext) {
+  return KIND_OF.get(String(ext || "").toLowerCase()) || "file";
 }
 
-function imageSrc(href) {
-  if (!imageSession) return "";
-  let h = String(href || "").replace(/^<|>$/g, "").replace(/^file:\/\//i, "");
+export function cleanTarget(href) {
+  let h = String(href || "").trim().replace(/^<|>$/g, "").replace(/^file:\/\//i, "");
   try { h = decodeURI(h); } catch { /* keep raw */ }
-  const m = h.match(/(?:^|\/)images\/([A-Za-z0-9._-]+\.(?:png|jpe?g|webp|gif))$/i);
-  if (m && (!h.startsWith("/") || h.includes("/" + imageSession + "/images/"))) {
-    return "/api/sessions/" + imageSession + "/image/" + encodeURIComponent(m[1]);
-  }
-  if (/^[a-z]+:/i.test(h) || !/\.(png|jpe?g|webp|gif)$/i.test(h)) return "";
-  return "/api/sessions/" + imageSession + "/file?p=" + encodeURIComponent(h);
+  return h;
 }
+
+// A path on the machine (not a URL, an anchor or one of our own routes) that names a file by its extension. Whether
+// the file exists is for the server's filesystem to say.
+export function isLocalRef(target) {
+  const h = cleanTarget(target);
+  if (!h || h.length > 1000 || h.startsWith("#") || h.startsWith("//") || h.startsWith("/api/")) return false;
+  return !/^[a-z][a-z0-9+.-]*:/i.test(h) && HAS_EXT.test(h);
+}
+
+// What a stored reference says: the store name, its type, the file's own name, or that it was over the cap.
+export function parseMedia(href) {
+  const text = String(href || "");
+  if (!text.startsWith(MEDIA_PREFIX)) return null;
+  const [route, query = ""] = text.slice(MEDIA_PREFIX.length).split("?");
+  const params = new URLSearchParams(query);
+  if (route === "limit") return { limit: true, size: Number(params.get("size")) || 0, label: params.get("n") || "file", reason: params.get("why") || "" };
+  const ext = (route.split(".")[1] || "").toLowerCase();
+  return { name: route, ext, kind: embedKind(ext), label: params.get("n") || route, url: MEDIA_PREFIX + route, href: text };
+}
+
+// Every reference to a local file in the text, found the way renderMarkdown reads it: markdown links and images, and
+// a path alone on its line. Fenced code and `code spans` are skipped.
+export function findRefs(text) {
+  const src = String(text ?? "");
+  const found = [];
+  let fenced = false;
+  let offset = 0;
+  for (const line of src.split("\n")) {
+    const lineStart = offset;
+    offset += line.length + 1;
+    if (line.trim().startsWith("```")) {
+      fenced = !fenced;
+      continue;
+    }
+    if (fenced) continue;
+    const before = found.length;
+    let i = 0;
+    while (i < line.length) {
+      if (line[i] === "`") {
+        const end = line.indexOf("`", i + 1);
+        if (end > i + 1) {
+          i = end + 1;
+          continue;
+        }
+      }
+      const image = line[i] === "!" && line[i + 1] === "[";
+      if (image || line[i] === "[") {
+        const open = image ? i + 2 : i + 1;
+        const close = line.indexOf("]", open);
+        const end = close > i && line[close + 1] === "(" ? line.indexOf(")", close + 2) : -1;
+        if (end !== -1) {
+          const raw = line.slice(close + 2, end);
+          const lead = raw.length - raw.trimStart().length;
+          found.push({
+            kind: image ? "image" : "link",
+            start: lineStart + i,
+            end: lineStart + end + 1,
+            label: line.slice(open, close),
+            target: raw.trim(),
+            targetStart: lineStart + close + 2 + lead,
+            targetEnd: lineStart + close + 2 + lead + raw.trim().length,
+          });
+          i = end + 1;
+          continue;
+        }
+      }
+      i += 1;
+    }
+    if (found.length === before) {
+      const m = /^(\s*(?:[-*+]|\d+[.)])\s+)?(`?)([^\s`<>|*?"'()\[\]]+)\2\s*$/.exec(line);
+      if (m && /[./]/.test(m[3]) && isLocalRef(m[3])) {
+        const start = lineStart + (m[1] || "").length;
+        found.push({ kind: "bare", start, end: start + m[2].length * 2 + m[3].length, label: "", target: m[3], targetStart: start + m[2].length, targetEnd: start + m[2].length + m[3].length });
+      }
+    }
+  }
+  return found;
+}
+
+export function baseName(target) {
+  return cleanTarget(target).split(/[\\/]/).filter(Boolean).pop() || "file";
+}
+
+// New text with the given targets swapped (map: old target -> stored URL), by position and never by search. A path
+// alone on its line becomes a link to the stored file, named as the file was.
+export function rewriteRefs(text, map) {
+  let out = String(text ?? "");
+  for (const ref of findRefs(out).filter((r) => map.has(r.target)).reverse()) {
+    const url = map.get(ref.target);
+    if (ref.kind === "bare") out = out.slice(0, ref.start) + "[" + baseName(ref.target).replace(/[\[\]]/g, "") + "](" + url + ")" + out.slice(ref.end);
+    else out = out.slice(0, ref.targetStart) + url + out.slice(ref.targetEnd);
+  }
+  return out;
+}
+
+function sizeText(bytes) {
+  const n = Number(bytes) || 0;
+  if (n >= 1024 * 1024) return (n / 1024 / 1024).toFixed(n >= 10 * 1024 * 1024 ? 0 : 1) + " MB";
+  if (n >= 1024) return Math.round(n / 1024) + " KB";
+  return n + " B";
+}
+
+function noteCard(title, line) {
+  return '<span class="md-missing"><span class="md-missing-title">' + escapeHtml(title) + '</span><span class="md-missing-name">' + escapeHtml(line) + "</span></span>";
+}
+
+function missingCard(label, target) {
+  return noteCard("Image moved or deleted".replace("Image", /\.(png|jpe?g|webp|gif)$/i.test(cleanTarget(target)) ? "Image" : "File"), label || baseName(target));
+}
+
+function limitCard(info) {
+  const why = info.reason === "store" ? "The media store is full." : "Over the " + sizeText(LIMIT_BYTES) + " limit.";
+  return noteCard("File too large to keep", info.label + " · " + sizeText(info.size) + ". " + why);
+}
+
+export const LIMIT_BYTES = 25 * 1024 * 1024;
+
+// The card for a stored reference. Pictures are drawn here; every other type is a placeholder the page fills in.
+function mediaEmbed(info, label) {
+  if (info.limit) return limitCard(info);
+  if (info.kind === "image") return '<span class="shots md-shot"><img src="' + escapeHtml(info.href) + '" alt="' + escapeHtml(label || info.label) + '" loading="lazy" /></span>';
+  return '<span class="embed" data-src="' + escapeHtml(info.url) + '" data-kind="' + info.kind + '" data-name="' + escapeHtml(info.label) + '"></span>';
+}
+
+let embedsOn = true;
 
 function inline(raw) {
   const src = String(raw);
@@ -49,9 +183,11 @@ function inline(raw) {
     if (src[i] === "!" && src[i + 1] === "[") {
       const close = src.indexOf("]", i + 2);
       const end = close > i && src[close + 1] === "(" ? src.indexOf(")", close + 2) : -1;
-      const img = end !== -1 ? imageSrc(src.slice(close + 2, end).trim()) : "";
-      if (img) {
-        out += '<span class="shots md-shot"><img src="' + escapeHtml(img) + '" alt="' + escapeHtml(src.slice(i + 2, close)) + '" loading="lazy" /></span>';
+      const target = end !== -1 ? src.slice(close + 2, end).trim() : "";
+      const alt = end !== -1 ? src.slice(i + 2, close) : "";
+      const info = parseMedia(target);
+      if (info || isLocalRef(target)) {
+        out += !embedsOn ? escapeHtml(alt || baseName(target)) : info ? mediaEmbed(info, alt) : missingCard(alt, target);
         i = end + 1;
         continue;
       }
@@ -61,6 +197,13 @@ function inline(raw) {
       if (close > i && src[close + 1] === "(") {
         const end = src.indexOf(")", close + 2);
         const href = end === -1 ? "" : src.slice(close + 2, end).trim();
+        const info = end === -1 ? null : parseMedia(href);
+        if (end !== -1 && (info || isLocalRef(href))) {
+          const text = src.slice(i + 1, close);
+          out += !embedsOn ? escapeHtml(text || baseName(href)) : info ? mediaEmbed(info, text) : missingCard(text, href);
+          i = end + 1;
+          continue;
+        }
         if (end !== -1 && /^https?:\/\//i.test(href)) {
           out +=
             '<a href="' +
@@ -139,7 +282,17 @@ const COPY_ICONS =
   '<svg class="ico ico-copy" viewBox="0 0 18 18" aria-hidden="true"><rect x="6.25" y="2.25" width="9.5" height="9.5" rx="1.5"/><rect x="2.25" y="6.25" width="9.5" height="9.5" rx="1.5"/></svg>' +
   '<svg class="ico ico-check" viewBox="0 0 18 18" aria-hidden="true"><path d="M4 9.5 7.5 13 14 5.5"/></svg>';
 
-export function renderMarkdown(src) {
+// embeds: false is for a document's own text, whose links are relative to that document and not to the chat.
+export function renderMarkdown(src, { embeds = true } = {}) {
+  embedsOn = embeds;
+  try {
+    return renderBlocks(src);
+  } finally {
+    embedsOn = true;
+  }
+}
+
+function renderBlocks(src) {
   const lines = String(src ?? "").replace(/\r\n/g, "\n").split("\n");
   let html = "";
   let i = 0;

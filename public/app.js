@@ -1,4 +1,5 @@
-import { renderMarkdown, setImageSession } from "./markdown.js";
+import { renderMarkdown } from "./markdown.js";
+import { docBody, hydrateEmbeds, sizeText } from "./embeds.js";
 import { applyEvent } from "./reduce.js";
 import { copyText } from "./clipboard.js";
 import { composerAction, hasComposerContent } from "./composer.js";
@@ -1338,9 +1339,41 @@ function proxyPermission(message, tool, keep, existing) {
 
 let domExisting = new Map();
 
+// One answer per turn, by position: in a turn (the messages after one user message), every assistant text
+// message except the last has been followed by a newer one, so it moves into the steps. While the turn runs
+// the newest message is the last one, so it stays on screen until a later one supersedes it.
+function supersededReplies(messages) {
+  const folded = new Set();
+  let turn = [];
+  const close = () => {
+    for (const message of turn.slice(0, -1)) folded.add(message);
+    turn = [];
+  };
+  for (const message of messages) {
+    if (message.role === "user") close();
+    else if (message.role === "assistant" && String(message.text || "").trim()) turn.push(message);
+  }
+  close();
+  return folded;
+}
+
+function stepsLabel(items, folded) {
+  const earlier = items.filter((m) => folded.has(m)).length;
+  const steps = items.length - earlier;
+  const failed = items.filter((m) => m.tool && (m.tool.status === "failed" || m.tool.status === "denied")).length;
+  const tokens = items.reduce((sum, m) => sum + (Number(m.tokens) || 0), 0);
+  const parts = [];
+  if (steps) parts.push(steps + (steps === 1 ? " step" : " steps"));
+  if (earlier) parts.push(earlier === 1 && !steps ? "Earlier message" : earlier + " earlier " + (earlier === 1 ? "message" : "messages"));
+  if (failed) parts.push(failed + " failed");
+  if (tokens) parts.push(tokensText(tokens));
+  return parts.join(" · ");
+}
+
 // Builds the nodes for one message list. Step messages between two replies fold into one "N steps" group.
 function syncList(messages, prefix, keep, nested) {
   const top = [];
+  const earlier = nested ? new Set() : supersededReplies(messages);
   let group = null;
   const closeGroup = () => {
     if (!group) return;
@@ -1351,9 +1384,7 @@ function syncList(messages, prefix, keep, nested) {
     });
     while (body.children.length > group.nodes.length) body.lastElementChild.remove();
     const failed = group.items.filter((m) => m.tool && (m.tool.status === "failed" || m.tool.status === "denied")).length;
-    const n = group.items.length;
-    const tokens = group.items.reduce((sum, m) => sum + (Number(m.tokens) || 0), 0);
-    node.querySelector(".steps-count").textContent = n + (n === 1 ? " step" : " steps") + (failed ? " · " + failed + " failed" : "") + (tokens ? " · " + tokensText(tokens) : "");
+    node.querySelector(".steps-count").textContent = stepsLabel(group.items, earlier);
     node.classList.toggle("has-failed", failed > 0);
     keep.add(node);
     top.push(node);
@@ -1371,7 +1402,8 @@ function syncList(messages, prefix, keep, nested) {
     } else updateMessage(node, message);
     keep.add(node);
     const asking = !nested && message.role === "tool" && message.tool && message.tool.waiting;
-    if (STEP_ROLES.has(message.role) && !asking) {
+    node.classList.toggle("earlier-reply", earlier.has(message));
+    if ((STEP_ROLES.has(message.role) || earlier.has(message)) && !asking) {
       if (!group) group = { id: "g-" + key, nodes: [], items: [] };
       group.nodes.push(node);
       group.items.push(message);
@@ -1828,7 +1860,9 @@ function updateMessage(node, message) {
   if (message.role === "assistant") {
     node._raw = message.text || "";
     if (node._text !== message.text) {
-      node.querySelector(".body").innerHTML = renderMarkdown(message.text || "");
+      const body = node.querySelector(".body");
+      body.innerHTML = renderMarkdown(message.text || "");
+      hydrateEmbeds(body, node._embeds || (node._embeds = new Map()), embedUi);
       node._text = message.text;
     }
     renderShots(node, message.images);
@@ -2643,7 +2677,6 @@ async function renderChat(token, id) {
   }
   closeStream();
   app.sessionId = id;
-  setImageSession(id);
   setNotice("");
   composer.hidden = false;
   main.replaceChildren();
@@ -2984,6 +3017,13 @@ const ICON_PATHS = {
   more: ["M4.5 9.9a.9.9 0 1 1 0-1.8.9.9 0 0 1 0 1.8Z", "M9 9.9a.9.9 0 1 1 0-1.8.9.9 0 0 1 0 1.8Z", "M13.5 9.9a.9.9 0 1 1 0-1.8.9.9 0 0 1 0 1.8Z"],
   sparkle: ["M9 2.5l1.6 4.9 4.9 1.6-4.9 1.6L9 15.5l-1.6-4.9L2.5 9l4.9-1.6Z"],
   moon: ["M14.5 10.5A6 6 0 0 1 7.5 3.5a6 6 0 1 0 7 7Z"],
+  file: ["M5 2.5h5.5L14 6v9.5H5Z", "M10.5 2.5V6H14"],
+  doc: ["M5 2.5h5.5L14 6v9.5H5Z", "M10.5 2.5V6H14", "M7 9.5h5", "M7 12h5"],
+  code: ["M7 5 3.5 9 7 13", "M11 5l3.5 4L11 13"],
+  video: ["M3 5h8.5v8H3Z", "M11.5 8l3.5-2v6l-3.5-2"],
+  audio: ["M7.5 13V4.5l6-1.5V11.5", "M5.75 15a1.75 1.75 0 1 0 0-3.5 1.75 1.75 0 0 0 0 3.5Z", "M11.75 13.5a1.75 1.75 0 1 0 0-3.5 1.75 1.75 0 0 0 0 3.5Z"],
+  expand: ["M10.5 3.5h4v4", "M14.5 3.5 10 8", "M7.5 14.5h-4v-4", "M3.5 14.5 8 10"],
+  download: ["M9 3v8.5", "M5.5 8.5 9 12l3.5-3.5", "M3.5 14.5h11"],
   sun: ["M9 12a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z", "M9 2v1.5M9 14.5V16M2 9h1.5M14.5 9H16M4.1 4.1l1 1M12.9 12.9l1 1M13.9 4.1l-1 1M5.1 12.9l-1 1"],
 };
 
@@ -3861,7 +3901,8 @@ jump.addEventListener("click", () => {
   jump.hidden = true;
 });
 
-main.addEventListener("click", async (event) => {
+const docview = document.getElementById("docview");
+async function copyCodeClick(event) {
   const copy = event.target.closest(".copy");
   if (!copy) return;
   const code = copy.parentElement.querySelector("code");
@@ -3869,7 +3910,9 @@ main.addEventListener("click", async (event) => {
   const ok = await copyText(code.textContent || "");
   flashCopied(copy);
   if (!ok) copy.setAttribute("aria-label", "Copy failed");
-});
+}
+main.addEventListener("click", copyCodeClick);
+docview.addEventListener("click", copyCodeClick);
 
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState !== "visible") return;
@@ -3897,6 +3940,81 @@ setInterval(() => {
 window.addEventListener("popstate", () => renderRoute());
 window.addEventListener("online", () => {
   if (route().name === "chat" && (!app.es || app.es.readyState !== EventSource.OPEN)) renderRoute();
+});
+
+// A stored image that cannot load (the store file is gone) becomes the same card as a missing source.
+document.addEventListener("error", (event) => {
+  const img = event.target;
+  if (!(img instanceof HTMLImageElement) || !img.closest(".md-shot")) return;
+  const card = document.createElement("span");
+  card.className = "md-missing";
+  const title = document.createElement("span");
+  title.className = "md-missing-title";
+  title.textContent = "Image moved or deleted";
+  const name = document.createElement("span");
+  name.className = "md-missing-name";
+  name.textContent = img.alt || "";
+  card.append(title, name);
+  img.closest(".md-shot").replaceWith(card);
+}, true);
+
+// The full-screen view of a document, code file or PDF a message links to.
+function closeDoc() {
+  docview.hidden = true;
+  docview.querySelector(".docview-body").replaceChildren();
+}
+
+function openDoc(spec) {
+  const body = docview.querySelector(".docview-body");
+  const tools = docview.querySelector(".docview-tools");
+  docview.querySelector(".docview-name").textContent = spec.name;
+  tools.replaceChildren();
+  body.replaceChildren();
+  if (spec.kind === "pdf") {
+    const frame = document.createElement("iframe");
+    frame.className = "docview-frame";
+    frame.src = spec.src;
+    frame.title = spec.name;
+    body.append(frame);
+  } else {
+    let view = 0;
+    const paint = () => {
+      body.replaceChildren(docBody(spec.kind, spec.text, spec.ext, view));
+      if (spec.cut) {
+        const note = document.createElement("p");
+        note.className = "embed-note";
+        note.textContent = "Showing the first part of the file. Download for the rest.";
+        body.append(note);
+      }
+    };
+    if (spec.kind === "markdown") {
+      const seg = document.createElement("div");
+      seg.className = "embed-seg";
+      seg.setAttribute("role", "group");
+      ["Rendered", "Raw"].forEach((label, index) => {
+        const b = button(label, () => {
+          view = index;
+          for (const other of seg.children) other.setAttribute("aria-pressed", other === b ? "true" : "false");
+          paint();
+        }, "embed-seg-btn");
+        b.setAttribute("aria-pressed", index === 0 ? "true" : "false");
+        seg.append(b);
+      });
+      tools.append(seg);
+    }
+    paint();
+  }
+  docview.hidden = false;
+  docview.querySelector(".docview-close").focus();
+}
+
+const embedUi = { icon: (name) => lineIcon(name), openDoc };
+
+const closeDocBtn = docview.querySelector(".docview-close");
+closeDocBtn.append(lineIcon("x"));
+closeDocBtn.addEventListener("click", closeDoc);
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !docview.hidden) closeDoc();
 });
 
 const viewer = document.getElementById("viewer");
