@@ -39,7 +39,7 @@
     <div id="app">
       <header id="top"></header>
       <main id="main"><p class="hint">Loading</p></main>
-      <p id="notice" hidden></p>
+      <p id="notice" role="alert" hidden></p>
       <form id="composer" hidden>
         <div id="longbar" hidden></div>
         <div id="skeptic" hidden></div>
@@ -65,11 +65,12 @@
             </div>
           </div>
         </div>
-        <input id="photos" type="file" accept="image/*" multiple hidden />
+        <input id="photos" type="file" multiple hidden />
       </form>
       <button type="button" id="jump" hidden>Latest</button>
       <div id="sheet" hidden><div class="sheet-panel" role="dialog" aria-label="Menu"></div></div>
       <div id="confirm" hidden><div class="confirm-panel" role="alertdialog" aria-modal="true"></div></div>
+      <div id="drop-target" hidden>Drop files to attach</div>
       <div id="viewer" hidden><img alt="Full size image" /></div>
       <div id="docview" hidden role="dialog" aria-modal="true" aria-label="File">
         <div class="docview-head">

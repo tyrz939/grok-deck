@@ -2,6 +2,7 @@ import { renderMarkdown } from "./markdown.js";
 import { docBody, hydrateEmbeds, sizeText } from "./embeds.js";
 import { applyEvent } from "./reduce.js";
 import { copyText } from "./clipboard.js";
+import { clipboardFiles, dragHasFiles, dropFiles, takeAttachments } from "./attach.js";
 import { composerAction, hasComposerContent } from "./composer.js";
 import { applyReasoning, longRunActive, modeChoice, reasoningChoice, reasoningChipText, ULTRA_HELP } from "./options.js";
 
@@ -80,7 +81,7 @@ const app = {
   quietClose: false,
   sending: false,
   draft: { cwd: "", model: "grok-4.7", effort: "high", permissionMode: "default", ultra: false, plan: false, longRun: false, longHours: 12 },
-  images: [],
+  files: [],
   imageRoute: "",
   queue: [],
   loops: [],
@@ -99,12 +100,12 @@ const thumbs = document.getElementById("thumbs");
 const photos = document.getElementById("photos");
 const attachBtn = document.getElementById("attach");
 
-function clearImages() {
-  for (const image of app.images) {
-    if (image.url) URL.revokeObjectURL(image.url);
+function clearFiles() {
+  for (const item of app.files) {
+    if (item.image?.url) URL.revokeObjectURL(item.image.url);
   }
-  app.images = [];
-  renderThumbs();
+  app.files = [];
+  renderChips();
 }
 
 function noteRoute(key) {
@@ -113,32 +114,42 @@ function noteRoute(key) {
   if (view !== "chat") applyNeutralChrome();
   if (app.imageRoute === key) return;
   app.imageRoute = key;
-  clearImages();
+  clearFiles();
 }
 
-function renderThumbs() {
+function renderChips() {
   thumbs.replaceChildren();
-  thumbs.hidden = app.images.length === 0;
-  for (const image of app.images) {
-    const wrap = document.createElement("div");
-    wrap.className = "thumb";
-    const img = document.createElement("img");
-    img.alt = "";
-    img.src = image.url;
+  thumbs.hidden = app.files.length === 0;
+  for (const item of app.files) {
+    const chip = document.createElement("div");
+    chip.className = "file-chip";
+    chip.dataset.name = item.name;
+    if (!item.store && !item.error) chip.setAttribute("aria-busy", "true");
+    const name = document.createElement("span");
+    name.className = "file-name";
+    name.textContent = item.name;
+    name.title = item.name;
+    const size = document.createElement("span");
+    size.className = "file-size";
+    size.textContent = sizeText(item.size);
     const remove = document.createElement("button");
     remove.type = "button";
-    remove.textContent = "x";
-    remove.setAttribute("aria-label", "Remove photo");
+    remove.setAttribute("aria-label", "Remove " + item.name);
+    remove.append(lineIcon("x"));
     remove.addEventListener("click", () => {
-      URL.revokeObjectURL(image.url);
-      app.images = app.images.filter((item) => item !== image);
-      renderThumbs();
-      growInput();
-      paintSend();
+      if (item.image?.url) URL.revokeObjectURL(item.image.url);
+      app.files = app.files.filter((file) => file !== item);
+      showChips();
     });
-    wrap.append(img, remove);
-    thumbs.append(wrap);
+    chip.append(name, size, remove);
+    thumbs.append(chip);
   }
+}
+
+function showChips() {
+  renderChips();
+  growInput();
+  paintSend();
 }
 
 function blobToBase64(blob) {
@@ -206,24 +217,66 @@ function prepareImage(file) {
   });
 }
 
-async function addFiles(files) {
-  let rejected = false;
-  for (const file of files) {
-    if (!file || !String(file.type || "").startsWith("image/")) continue;
-    if (app.images.length >= 4) {
-      setNotice("Attach up to 4 photos.");
-      break;
-    }
-    try {
-      app.images.push(await prepareImage(file));
-    } catch {
-      rejected = true;
-    }
+async function uploadAttachment(file) {
+  const name = file?.name || "file";
+  const res = await fetch("/api/media?name=" + encodeURIComponent(name), {
+    method: "POST",
+    headers: { "Content-Type": "application/octet-stream" },
+    body: file,
+    credentials: "same-origin",
+  });
+  const data = await res.json().catch(() => ({}));
+  if (res.status === 401) {
+    closeStream();
+    await showAuth();
+    const error = new Error("Login required");
+    error.auth = true;
+    throw error;
   }
-  if (rejected) setNotice("That photo could not be read. Try a JPEG or PNG.");
-  renderThumbs();
-  growInput();
-  paintSend();
+  if (!res.ok) throw new Error(data.error || name + " could not be attached.");
+  return data;
+}
+
+async function attachOne(pending) {
+  try {
+    const imageTask = pending.type.startsWith("image/") ? prepareImage(pending.file).catch(() => null) : Promise.resolve(null);
+    const [store, image] = await Promise.all([uploadAttachment(pending.file), imageTask]);
+    if (!app.files.includes(pending)) {
+      if (image?.url) URL.revokeObjectURL(image.url);
+      return;
+    }
+    pending.store = store;
+    pending.image = image;
+    showChips();
+  } catch (error) {
+    if (!app.files.includes(pending)) return;
+    pending.error = error.message || pending.name + " could not be attached.";
+    if (!error.auth) setNotice(pending.error);
+    showChips();
+  }
+}
+
+function addFiles(list) {
+  const { accepted, errors } = takeAttachments(list, { have: app.files.length });
+  if (errors.length) setNotice(errors.join(" "));
+  else if (accepted.length) setNotice("");
+  for (const item of accepted) {
+    const pending = { name: item.name, size: item.size, type: item.type, file: item.file, store: null, image: null, error: "" };
+    pending.done = attachOne(pending);
+    app.files.push(pending);
+  }
+  if (accepted.length) showChips();
+}
+
+async function packedMessage() {
+  await Promise.all(app.files.map((item) => item.done));
+  const broken = app.files.find((item) => !item.store);
+  if (broken) throw new Error(broken.error || broken.name + " could not be attached.");
+  return {
+    prompt: input.value.trim(),
+    images: app.files.flatMap((item) => (item.image ? [{ mime: item.image.mime, data: item.image.data }] : [])),
+    files: app.files.map((item) => ({ name: item.store.name, label: item.name })),
+  };
 }
 
 function safeDataUrl(image) {
@@ -381,7 +434,7 @@ function paintPlus() {
   const attention = auto || (chat && app.bypass);
   attachBtn.classList.toggle("flag-wait", !desktopMenu && waiting);
   attachBtn.classList.toggle("flag-auto", !desktopMenu && !waiting && attention);
-  attachBtn.setAttribute("aria-label", desktopMenu ? "Add photo" : "Menu");
+  attachBtn.setAttribute("aria-label", desktopMenu ? "Add file" : "Menu");
   const menu = document.querySelector(".side-menu");
   if (menu) {
     menu.classList.toggle("flag-wait", desktopMenu && waiting);
@@ -2756,10 +2809,11 @@ async function logout() {
   renderRoute();
 }
 
-async function sendPrompt(prompt, images) {
+async function sendPrompt(prompt, images, files) {
   const where = route();
   const body = { prompt };
   if (images && images.length) body.images = images;
+  if (files && files.length) body.files = files;
   if (where.name === "chat") {
     body.sessionId = where.id;
     if (app.session) {
@@ -2794,8 +2848,8 @@ composer.addEventListener("submit", async (event) => {
   event.preventDefault();
   if (app.sending) return;
   const prompt = input.value.trim();
-  const images = app.images.map((image) => ({ mime: image.mime, data: image.data }));
-  if (/^\/loops?(\s|$)/i.test(prompt) && !images.length) {
+  const pending = app.files.length;
+  if (/^\/loops?(\s|$)/i.test(prompt) && !pending) {
     app.sending = true;
     try {
       await sendLoopCommand(prompt);
@@ -2808,14 +2862,15 @@ composer.addEventListener("submit", async (event) => {
   }
   if (app.running && route().name === "chat") {
     // Desktop Enter / requestSubmit: queue as Send next. The button itself does Stop / Send now.
-    if (!prompt && !images.length) return;
+    if (!prompt && !pending) return;
     app.sending = true;
     try {
-      const body = { prompt, images, model: app.session?.model, effort: app.session?.effort, permissionMode: app.session?.permissionMode, ultra: !!app.session?.ultra };
+      const packed = await packedMessage();
+      const body = { ...packed, model: app.session?.model, effort: app.session?.effort, permissionMode: app.session?.permissionMode, ultra: !!app.session?.ultra };
       const saved = await api("/api/sessions/" + app.sessionId + "/queue", { method: "POST", body: JSON.stringify(body) });
       app.queue = saved.queue || [];
       input.value = "";
-      clearImages();
+      clearFiles();
       growInput();
       paintQueue();
     } catch (error) {
@@ -2825,8 +2880,8 @@ composer.addEventListener("submit", async (event) => {
     }
     return;
   }
-  if (!prompt && !images.length) {
-    setNotice("Write a message or attach a photo.");
+  if (!prompt && !pending) {
+    setNotice("Write a message or attach a file.");
     return;
   }
   const where = route();
@@ -2839,9 +2894,10 @@ composer.addEventListener("submit", async (event) => {
   const missing = document.getElementById("missing-dir");
   if (missing) missing.remove();
   try {
-    await sendPrompt(prompt, images);
+    const packed = await packedMessage();
+    await sendPrompt(packed.prompt, packed.images, packed.files);
     input.value = "";
-    clearImages();
+    clearFiles();
     app.imageRoute = "chat:" + (route().id || "");
     growInput();
   } catch (error) {
@@ -3311,7 +3367,7 @@ async function chooseLongRun() {
 // "Send next" stays on form submit / desktop Enter, not on this button.
 function paintSend() {
   const chat = route().name === "chat";
-  const hasContent = hasComposerContent(input.value, app.images.length);
+  const hasContent = hasComposerContent(input.value, app.files.length);
   const { label, mode } = composerAction({ running: app.running, chat, hasContent });
   if (sendBtn.textContent !== label) sendBtn.textContent = label;
   sendBtn.classList.toggle("stop-mode", mode === "stop");
@@ -3333,7 +3389,9 @@ function paintQueue() {
     tag.textContent = item.now ? "Sending" : index === 0 ? "Next" : "#" + (index + 1);
     const text = document.createElement("span");
     text.className = "q-text";
-    text.textContent = (item.text || "") + (item.images ? " · " + item.images + " photo" + (item.images > 1 ? "s" : "") : "");
+    const count = item.files || item.images || 0;
+    const word = item.files ? "file" : "photo";
+    text.textContent = (item.text || "") + (count ? " · " + count + " " + word + (count > 1 ? "s" : "") : "");
     const now = button("Now", () => queueNow(item.id), "mini");
     const cancel = button("✕", () => queueCancel(item.id), "mini q-x");
     cancel.setAttribute("aria-label", "Cancel queued message");
@@ -3570,7 +3628,7 @@ sheet.addEventListener("click", (event) => {
 
 async function menuItems() {
   const chat = route().name === "chat";
-  const items = [{ label: "Add photo", icon: "photo", run: () => { closeSheet(); photos.click(); } }];
+  const items = [{ label: "Add file", icon: "file", run: () => { closeSheet(); photos.click(); } }];
   if (chat) {
     const waiting = main.querySelector(".toolcard.asking");
     if (waiting && app.running) items.unshift({ label: "Go to approval", icon: "approve", accent: true, run: () => { closeSheet(); waiting.scrollIntoView({ block: "center", behavior: "smooth" }); } });
@@ -3810,24 +3868,32 @@ photos.addEventListener("change", () => {
   addFiles(files);
 });
 
+function setDropping(on) {
+  document.body.classList.toggle("dropping", on);
+  const target = document.getElementById("drop-target");
+  if (target) target.hidden = !on;
+}
+
 document.addEventListener("paste", (event) => {
   if (composer.hidden) return;
-  const items = [...(event.clipboardData?.items || [])];
-  const images = items.filter((item) => item.kind === "file" && String(item.type || "").startsWith("image/"));
-  if (!images.length) return;
+  const files = clipboardFiles(event.clipboardData);
+  if (!files.length) return;
   event.preventDefault();
-  addFiles(images.map((item) => item.getAsFile()).filter(Boolean));
+  addFiles(files);
 });
 
 composer.addEventListener("dragover", (event) => {
-  const items = [...(event.dataTransfer?.items || [])];
-  if (items.some((item) => String(item.type || "").startsWith("image/"))) event.preventDefault();
+  if (!dragHasFiles(event.dataTransfer)) return;
+  event.preventDefault();
+  if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
+  setDropping(true);
 });
 
 composer.addEventListener("drop", (event) => {
-  const files = [...(event.dataTransfer?.files || [])].filter((file) => String(file.type || "").startsWith("image/"));
+  const files = dropFiles(event.dataTransfer);
   if (!files.length) return;
   event.preventDefault();
+  setDropping(false);
   addFiles(files);
 });
 
@@ -3846,18 +3912,18 @@ async function stopTurn() {
 async function sendNowFromComposer() {
   if (app.sending || !app.sessionId) return;
   const prompt = input.value.trim();
-  const images = app.images.map((image) => ({ mime: image.mime, data: image.data }));
-  if (!prompt && !images.length) return;
-  if (/^\/loops?(\s|$)/i.test(prompt) && !images.length) {
+  const pending = app.files.length;
+  if (!prompt && !pending) return;
+  if (/^\/loops?(\s|$)/i.test(prompt) && !pending) {
     composer.requestSubmit(); // a /loop command never interrupts the running turn
     return;
   }
   app.sending = true;
   sendBtn.disabled = true;
   try {
+    const packed = await packedMessage();
     const body = {
-      prompt,
-      images,
+      ...packed,
       model: app.session?.model,
       effort: app.session?.effort,
       permissionMode: app.session?.permissionMode,
@@ -3866,7 +3932,7 @@ async function sendNowFromComposer() {
     const saved = await api("/api/sessions/" + app.sessionId + "/queue", { method: "POST", body: JSON.stringify(body) });
     app.queue = saved.queue || [];
     input.value = "";
-    clearImages();
+    clearFiles();
     growInput();
     if (saved.id) {
       const now = await api("/api/sessions/" + app.sessionId + "/queue/" + saved.id + "/now", { method: "POST", body: "{}" });
@@ -3886,7 +3952,7 @@ async function sendNowFromComposer() {
 sendBtn.addEventListener("click", (event) => {
   if (!app.running || route().name !== "chat") return;
   event.preventDefault();
-  if (!hasComposerContent(input.value, app.images.length)) stopTurn();
+  if (!hasComposerContent(input.value, app.files.length)) stopTurn();
   else sendNowFromComposer();
 });
 
@@ -4319,7 +4385,7 @@ function showKeys() {
     ["← / →", "Resize the sessions pane when its edge is focused"],
     ["Esc", "Close panels and menus"],
     ["?", "This help"],
-    ["Paste or drop", "Attach images"],
+    ["Paste or drop", "Attach files"],
   ];
   const dl = document.createElement("dl");
   for (const [k, v] of rows) {
@@ -4407,21 +4473,20 @@ document.addEventListener("keydown", (event) => {
   }
 });
 
-// Drop images anywhere in the window on desktop.
+// Drop files anywhere in the window. The overlay is the drop target.
 document.addEventListener("dragover", (event) => {
-  if (composer.hidden) return;
-  if ([...(event.dataTransfer?.items || [])].some((i) => String(i.type || "").startsWith("image/"))) {
-    event.preventDefault();
-    document.body.classList.add("dropping");
-  }
+  if (composer.hidden || !dragHasFiles(event.dataTransfer)) return;
+  event.preventDefault();
+  if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
+  setDropping(true);
 });
 document.addEventListener("dragleave", (event) => {
-  if (!event.relatedTarget) document.body.classList.remove("dropping");
+  if (!event.relatedTarget) setDropping(false);
 });
 document.addEventListener("drop", (event) => {
-  document.body.classList.remove("dropping");
+  setDropping(false);
   if (composer.hidden || event.defaultPrevented) return;
-  const files = [...(event.dataTransfer?.files || [])].filter((f) => String(f.type || "").startsWith("image/"));
+  const files = dropFiles(event.dataTransfer);
   if (!files.length) return;
   event.preventDefault();
   addFiles(files);

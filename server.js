@@ -50,7 +50,7 @@ import {
   resolveInside,
   trashSession,
 } from "./lib/sessions.js";
-import { internMessages, mediaType, statMedia } from "./lib/media.js";
+import { internMessages, MAX_FILE, mediaType, statMedia, storeUpload, uploadName } from "./lib/media.js";
 import { getTheme, neutralThemeColor, neutralVars, themeCss } from "./lib/theme.js";
 
 const PORT = getPort();
@@ -96,6 +96,37 @@ function sendJson(res, code, obj) {
 function sendText(res, code, text) {
   res.writeHead(code, withSecurity({ "Content-Type": "text/plain; charset=utf-8" }));
   res.end(text);
+}
+
+function readRaw(req, limit) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let size = 0;
+    let settled = false;
+    const fail = (error) => {
+      if (settled) return;
+      settled = true;
+      reject(error);
+    };
+    req.on("data", (chunk) => {
+      if (settled) return;
+      size += chunk.length;
+      if (size > limit) {
+        const error = new Error("too large");
+        error.status = 413;
+        fail(error);
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on("end", () => {
+      if (settled) return;
+      settled = true;
+      resolve(Buffer.concat(chunks));
+    });
+    req.on("error", fail);
+  });
 }
 
 function readBody(req) {
@@ -492,6 +523,24 @@ async function handleApi(req, res, url) {
     return;
   }
 
+  // A file the user attached. Bytes are stored by hash; the name only chooses the extension and the label.
+  if (req.method === "POST" && pathname === "/api/media") {
+    const label = uploadName(url.searchParams.get("name") || req.headers["x-file-name"]);
+    let body;
+    try {
+      body = await readRaw(req, MAX_FILE + 1);
+    } catch (error) {
+      if (error.status === 413) {
+        sendJson(res, 413, { error: label + " is over the 25 MB limit." });
+        return;
+      }
+      throw error;
+    }
+    const stored = await storeUpload(body, label);
+    sendJson(res, 200, { name: stored.name, url: stored.url, size: stored.size, label: stored.label });
+    return;
+  }
+
   // The media store: the only place files in messages are served from. A name is a sha256, so it never changes.
   // Range requests are answered because iOS will not play video or audio without them.
   const mediaMatch = pathname.match(/^\/api\/media\/([0-9a-f]{64}\.[a-z0-9]{1,8})$/);
@@ -838,6 +887,7 @@ async function handleApi(req, res, url) {
       cwd: body.cwd,
       prompt: body.prompt,
       images: body.images,
+      files: body.files,
       model: body.model,
       effort: body.effort,
       permissionMode: body.permissionMode,
