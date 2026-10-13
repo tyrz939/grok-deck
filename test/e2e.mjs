@@ -1503,7 +1503,7 @@ try {
       assert.equal(desk.mark, desk.dot);
       assert.notEqual(desk.mark, "rgba(0, 0, 0, 0)");
       assert.equal(desk.menu, "Session menu");
-      assert.equal(desk.plus, "Add photo");
+      assert.equal(desk.plus, "Add file");
       assert.deepEqual(desk.flow, []);
       const active = desk.rows.filter((item) => item.on);
       const rest = desk.rows.filter((item) => !item.on);
@@ -1518,7 +1518,7 @@ try {
       await page.locator(".side-row.on .side-menu").click();
       await page.waitForSelector("#sheet:not([hidden])");
       const labels = await page.locator("#sheet .sheet-item").allTextContents();
-      assert.ok(labels.some((text) => text.includes("Add photo")), labels.join(" | "));
+      assert.ok(labels.some((text) => text.includes("Add file")), labels.join(" | "));
       for (const gone of ["Session settings", "Plan mode", "Long run", "Loops"]) {
         assert.equal(labels.some((text) => text.includes(gone)), false, gone + " still in the menu: " + labels.join(" | "));
       }
@@ -1694,7 +1694,7 @@ try {
       await page.locator("#attach").click();
       await page.waitForSelector("#sheet:not([hidden])");
       const menu = await page.locator("#sheet .sheet-item").allTextContents();
-      assert.ok(menu.some((text) => text.includes("Add photo")), menu.join(" | "));
+      assert.ok(menu.some((text) => text.includes("Add file")), menu.join(" | "));
       assert.ok(menu.some((text) => text.includes("Archive")), menu.join(" | "));
       for (const gone of ["Plan mode", "Long run", "Session settings", "Loops"]) {
         assert.equal(menu.some((text) => text.includes(gone)), false, gone + " " + menu.join(" | "));
@@ -3521,7 +3521,7 @@ try {
       await page.locator("#sheet .sheet-item").filter({ hasText: "Review this turn now" }).waitFor();
       await assertSurface("skeptical review");
       await page.locator("#sheet .sheet-item").filter({ hasText: /^Back$/ }).click();
-      await page.locator("#sheet .sheet-item").filter({ hasText: "Add photo" }).waitFor();
+      await page.locator("#sheet .sheet-item").filter({ hasText: "Add file" }).waitFor();
       await assertSurface("menu again");
       await page.keyboard.press("Escape");
       await page.waitForSelector("#sheet", { state: "hidden" });
@@ -4026,6 +4026,174 @@ try {
         return problems;
       });
       assert.deepEqual(desk, []);
+      await page.close();
+    } finally {
+      await browser.close();
+    }
+  });
+
+  await check("attachments: any file up to 25 MB is stored, and paste or drop shows a chip", async () => {
+    const samples = [
+      ["notes.md", "# Notes\n"],
+      ["report.pdf", "%PDF-1.4\n"],
+      ["brief.docx", "docx-bytes"],
+      ["bundle.zip", "PK\x03\x04zip"],
+      ["main.js", "export const n = 1;\n"],
+    ];
+    const stored = [];
+    for (const [name, text] of samples) {
+      const res = await fetch(BASE + "/api/media?name=" + encodeURIComponent(name), {
+        method: "POST",
+        headers: { "Content-Type": "application/octet-stream", Cookie: cookie },
+        body: Buffer.from(text),
+      });
+      const json = await res.json();
+      assert.equal(res.status, 200, name + " " + JSON.stringify(json));
+      assert.match(json.name, /^[0-9a-f]{64}\.[a-z0-9]{1,8}$/);
+      assert.equal(json.label, name);
+      const got = await fetch(BASE + json.url, { headers: { Cookie: cookie } });
+      assert.equal(got.status, 200, name);
+      assert.equal(Buffer.from(await got.arrayBuffer()).toString(), text);
+      stored.push(json);
+    }
+    const big = await fetch(BASE + "/api/media?name=" + encodeURIComponent("big.zip"), {
+      method: "POST",
+      headers: { "Content-Type": "application/octet-stream", Cookie: cookie },
+      body: Buffer.alloc(25 * 1024 * 1024 + 1),
+    });
+    const bigJson = await big.json();
+    assert.equal(big.status, 413, JSON.stringify(bigJson));
+    assert.match(bigJson.error, /big\.zip is over the 25 MB limit/);
+    const dir = project("attach");
+    const started = await api("POST", "/api/turns", {
+      cwd: dir,
+      prompt: "[[say attached]]",
+      files: stored.map((item) => ({ name: item.name, label: item.label })),
+      permissionMode: "default",
+      skeptic: "off",
+    });
+    assert.equal(started.status, 200, JSON.stringify(started.json));
+    const id = started.json.sessionId;
+    await idle(id);
+    const root = path.join(GHOME, "sessions");
+    let updates = "";
+    for (const group of fs.readdirSync(root, { withFileTypes: true })) {
+      if (!group.isDirectory()) continue;
+      const file = path.join(root, group.name, id, "updates.jsonl");
+      if (fs.existsSync(file)) updates = fs.readFileSync(file, "utf8");
+    }
+    assert.ok(updates, "user message was recorded");
+    for (const item of stored) {
+      const file = path.join(DATA, "media", item.name);
+      assert.ok(fs.existsSync(file), item.name);
+      assert.ok(updates.includes(file), "agent path " + item.label);
+      assert.ok(updates.includes(item.url.split("?")[0]), "agent link " + item.label);
+    }
+
+    const chromium = await loadChromium("attachments");
+    if (!chromium) return;
+    const browser = await launchChromium(chromium);
+    try {
+      const token = cookie.split("=")[1];
+      const page = await browser.newPage({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 1 });
+      await page.context().addCookies([{ name: "gm_session", value: token, url: BASE, httpOnly: true, sameSite: "Strict" }]);
+      await page.goto(BASE + "/new", { waitUntil: "domcontentloaded" });
+      await page.waitForSelector("#composer:not([hidden]) #input");
+      await page.locator("#photos").waitFor({ state: "attached" });
+      await page.locator("#attach").click();
+      await page.locator("#sheet .sheet-item").filter({ hasText: "Add file" }).waitFor();
+      const [chooser] = await Promise.all([
+        page.waitForEvent("filechooser"),
+        page.locator("#sheet .sheet-item").filter({ hasText: "Add file" }).click(),
+      ]);
+      const longName = "notes-with-a-very-long-file-name-that-must-stay-inside-the-composer.md";
+      await chooser.setFiles({ name: longName, mimeType: "text/markdown", buffer: Buffer.from("# from the menu\n") });
+      await page.locator(".file-chip[data-name='" + longName + "']").waitFor();
+
+      const pasted = await page.evaluate(() => {
+        const files = [
+          new File(["# paste"], "pasted.md", { type: "text/markdown" }),
+          new File(["%PDF"], "pasted.pdf", { type: "application/pdf" }),
+          new File(["docx"], "pasted.docx", { type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" }),
+          new File(["PK"], "pasted.zip", { type: "application/zip" }),
+          new File(["const n = 1"], "pasted.js", { type: "text/javascript" }),
+        ];
+        const dt = new DataTransfer();
+        for (const file of files) dt.items.add(file);
+        const event = new Event("paste", { bubbles: true, cancelable: true });
+        Object.defineProperty(event, "clipboardData", { value: dt });
+        const text = new Event("paste", { bubbles: true, cancelable: true });
+        const textData = new DataTransfer();
+        textData.setData("text/plain", "just text");
+        Object.defineProperty(text, "clipboardData", { value: textData });
+        const textAllowed = document.dispatchEvent(text);
+        const fileAllowed = document.dispatchEvent(event);
+        return { textAllowed, fileAllowed };
+      });
+      assert.equal(pasted.textAllowed, true);
+      assert.equal(pasted.fileAllowed, false);
+      for (const name of ["pasted.md", "pasted.pdf", "pasted.docx", "pasted.zip", "pasted.js"]) {
+        await page.locator(".file-chip[data-name='" + name + "']").waitFor();
+      }
+
+      const dropped = await page.evaluate(() => {
+        const file = new File(["code"], "dropped.py", { type: "text/x-python" });
+        const dt = new DataTransfer();
+        dt.items.add(file);
+        const over = new DragEvent("dragover", { bubbles: true, cancelable: true, dataTransfer: dt });
+        document.dispatchEvent(over);
+        const showing = !document.getElementById("drop-target").hidden && document.body.classList.contains("dropping");
+        const drop = new DragEvent("drop", { bubbles: true, cancelable: true, dataTransfer: dt });
+        document.dispatchEvent(drop);
+        const textDrag = new DataTransfer();
+        textDrag.setData("text/plain", "nope");
+        document.dispatchEvent(new DragEvent("dragover", { bubbles: true, cancelable: true, dataTransfer: textDrag }));
+        return { showing, still: !document.getElementById("drop-target").hidden };
+      });
+      assert.equal(dropped.showing, true);
+      assert.equal(dropped.still, false);
+      await page.locator(".file-chip[data-name='dropped.py']").waitFor();
+
+      const tooBig = await page.evaluate(() => {
+        const file = new File([new Uint8Array(25 * 1024 * 1024 + 1)], "too-big.zip", { type: "application/zip" });
+        const dt = new DataTransfer();
+        dt.items.add(file);
+        const drop = new DragEvent("drop", { bubbles: true, cancelable: true, dataTransfer: dt });
+        document.dispatchEvent(drop);
+        const notice = document.getElementById("notice");
+        return { hidden: notice.hidden, text: notice.textContent, chips: document.querySelectorAll(".file-chip").length };
+      });
+      assert.equal(tooBig.hidden, false);
+      assert.match(tooBig.text, /too-big\.zip is over the 25 MB limit/);
+      assert.equal(tooBig.chips, 7);
+
+      const overlaps = async () => page.evaluate(() => {
+        const problems = [];
+        const input = document.querySelector("#input").getBoundingClientRect();
+        const composer = document.querySelector("#composer").getBoundingClientRect();
+        const slack = 1;
+        if (document.querySelector("#composer").scrollWidth > document.querySelector("#composer").clientWidth + slack) problems.push("composer scrolls sideways");
+        for (const chip of document.querySelectorAll(".file-chip")) {
+          const box = chip.getBoundingClientRect();
+          const name = chip.querySelector(".file-name").getBoundingClientRect();
+          const size = chip.querySelector(".file-size").getBoundingClientRect();
+          const remove = chip.querySelector("button");
+          const button = remove.getBoundingClientRect();
+          const hit = (a, b) => a.left < b.right - 0.5 && a.right > b.left + 0.5 && a.top < b.bottom - 0.5 && a.bottom > b.top + 0.5;
+          if (hit(box, input)) problems.push(chip.dataset.name + " overlaps the message");
+          if (box.left < composer.left - slack || box.right > composer.right + slack) problems.push(chip.dataset.name + " leaves the composer");
+          if (hit(name, size) || hit(name, button) || hit(size, button)) problems.push(chip.dataset.name + " parts overlap");
+          if (!chip.querySelector(".file-size").textContent.trim()) problems.push(chip.dataset.name + " has no size");
+          if (!remove.getAttribute("aria-label")) problems.push(chip.dataset.name + " cannot be removed");
+        }
+        return problems;
+      });
+      assert.deepEqual(await overlaps(), []);
+      await page.locator(".file-chip[data-name='" + longName + "'] button").click();
+      await page.locator(".file-chip[data-name='" + longName + "']").waitFor({ state: "detached" });
+      await page.setViewportSize({ width: 1440, height: 900 });
+      await page.waitForFunction(() => document.querySelector("#attach").getAttribute("aria-label") === "Menu" || document.querySelector("#attach").getAttribute("aria-label") === "Add file");
+      assert.deepEqual(await overlaps(), []);
       await page.close();
     } finally {
       await browser.close();

@@ -8,6 +8,7 @@ import { cleanImages } from "../lib/images.js";
 import { hostAllowedName, isAllowedIp, isPrivateLan, lanHostAllowed } from "../lib/net.js";
 import { contrastText, cssColor, neutralThemeColor, neutralVars, parseColors, prettifySlug, slugifyName, themeCss } from "../lib/theme.js";
 import { applyEvent, extractImages, plainText } from "../public/reduce.js";
+import { ATTACH_LIMIT, ATTACH_MAX, attachmentDecision, clipboardFiles, dragHasFiles, dropFiles, takeAttachments } from "../public/attach.js";
 import { copyText } from "../public/clipboard.js";
 import { composerAction, hasComposerContent } from "../public/composer.js";
 import { applyReasoning, longRunActive, modeChoice, reasoningChoice, reasoningChipText, ULTRA_HELP } from "../public/options.js";
@@ -909,6 +910,46 @@ test("media store: any local file a message links to is copied once, survives it
   const big = await media.internTarget("big.mp4", session);
   assert.match(big, /^\/api\/media\/limit\?size=\d+&n=big\.mp4$/);
   assert.match(renderMarkdown("[v](" + big + ")"), /File too large to keep/);
+
+  const samples = [
+    ["notes.md", "# Notes\n"],
+    ["report.pdf", "%PDF-1.4\n"],
+    ["brief.docx", "docx-bytes"],
+    ["bundle.zip", "PK\x03\x04zip"],
+    ["main.js", "export const n = 1;\n"],
+    ["Makefile", "all:\n"],
+  ];
+  const stored = [];
+  for (const [name, text] of samples) {
+    const saved = await media.storeUpload(Buffer.from(text), name);
+    assert.match(saved.name, /^[0-9a-f]{64}\.[a-z0-9]{1,8}$/, name);
+    assert.equal(saved.label, name);
+    assert.ok(saved.url.startsWith("/api/media/" + saved.name), name);
+    assert.equal(await fs.readFile(saved.path, "utf8"), text);
+    stored.push(saved);
+  }
+  const image = await media.storeUpload(png, "shot.png");
+  assert.ok(image.name.endsWith(".png"));
+  const fakeImage = await media.storeUpload(Buffer.from("not a png"), "fake.png");
+  assert.ok(fakeImage.name.endsWith(".bin"), "a mismatched image is still kept");
+  await assert.rejects(() => media.storeUpload(Buffer.alloc(media.MAX_FILE + 1), "big.zip"), /big\.zip is over the 25 MB limit/);
+  for (const name of await fs.readdir(path.join(data, "media"))) {
+    if (!/^[0-9a-f]{64}\./.test(name)) continue;
+    const stat = await fs.stat(path.join(data, "media", name));
+    assert.ok(stat.size <= media.MAX_FILE, name);
+  }
+  const resolved = await media.resolveUploads(stored.map((item) => ({ name: item.name, label: item.label })));
+  const note = media.attachmentNote(resolved);
+  for (const item of resolved) {
+    assert.ok(note.includes(item.path), item.label);
+    assert.ok(note.includes(item.url), item.label);
+    assert.ok(await fs.stat(item.path), item.label);
+  }
+  assert.throws(() => media.cleanUploads([{ name: "../secret", label: "x" }]), /Unknown attachment/);
+  assert.throws(() => media.cleanUploads(new Array(media.MAX_UPLOADS + 1).fill({ name: "a".repeat(64) + ".md", label: "a.md" })), /Attach up to 8/);
+  assert.deepEqual(media.cleanUploads(null), []);
+  assert.equal(media.MAX_UPLOADS, ATTACH_MAX);
+  assert.equal(media.MAX_FILE, ATTACH_LIMIT);
 });
 
 test("stored files render by type, and documents keep their own text out of the chat's embeds", () => {
@@ -924,4 +965,73 @@ test("stored files render by type, and documents keep their own text out of the 
   assert.match(renderMarkdown("[x](/gone/a.zip)"), /File moved or deleted/);
   assert.equal(renderMarkdown("[x](/gone/a.zip)", { embeds: false }), "<p>x</p>");
   assert.equal(parseMedia("/api/media/" + h + ".md?n=n.md").label, "n.md");
+});
+
+test("attachments accept any type and refuse files over 25 MB", () => {
+  assert.equal(ATTACH_LIMIT, 25 * 1024 * 1024);
+  assert.equal(ATTACH_MAX, 8);
+  const kinds = [
+    { name: "notes.md", type: "text/markdown" },
+    { name: "report.pdf", type: "application/pdf" },
+    { name: "brief.docx", type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" },
+    { name: "bundle.zip", type: "application/zip" },
+    { name: "main.js", type: "text/javascript" },
+    { name: "photo.png", type: "image/png" },
+    { name: "Makefile", type: "" },
+    { name: "no-type", type: "" },
+  ];
+  for (const file of kinds) {
+    const decision = attachmentDecision({ ...file, size: 20 });
+    assert.equal(decision.ok, true, file.name);
+    assert.equal(decision.file.name, file.name);
+    assert.equal(decision.file.type, file.type);
+  }
+  assert.equal(attachmentDecision({ name: "exact.pdf", size: ATTACH_LIMIT, type: "application/pdf" }).ok, true);
+  const over = attachmentDecision({ name: "big.zip", size: ATTACH_LIMIT + 1, type: "application/zip" });
+  assert.equal(over.ok, false);
+  assert.match(over.message, /big\.zip/);
+  assert.match(over.message, /25 MB/);
+  const taken = takeAttachments([
+    { name: "a.md", size: 4, type: "" },
+    { name: "big.zip", size: ATTACH_LIMIT + 1, type: "application/zip" },
+    { name: "c.docx", size: 8, type: "" },
+  ]);
+  assert.deepEqual(taken.accepted.map((item) => item.name), ["a.md", "c.docx"]);
+  assert.equal(taken.errors.length, 1);
+  assert.match(taken.errors[0], /big\.zip is over the 25 MB limit/);
+  const full = takeAttachments(
+    Array.from({ length: 3 }, (_, i) => ({ name: "f" + i + ".txt", size: 1, type: "text/plain" })),
+    { have: ATTACH_MAX - 1 }
+  );
+  assert.equal(full.accepted.length, 1);
+  assert.equal(full.errors.length, 2);
+  assert.match(full.errors[0], /Attach up to 8 files/);
+});
+
+test("paste and drop keep every file and ignore plain text", () => {
+  const md = { name: "notes.md", size: 4, type: "text/markdown" };
+  const pdf = { name: "report.pdf", size: 8, type: "application/pdf" };
+  const docx = { name: "brief.docx", size: 12, type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" };
+  const zip = { name: "bundle.zip", size: 16, type: "application/zip" };
+  const code = { name: "main.js", size: 3, type: "" };
+  const pasted = clipboardFiles({
+    items: [
+      { kind: "string", type: "text/plain", getAsFile: () => null },
+      { kind: "file", type: md.type, getAsFile: () => md },
+      { kind: "file", type: pdf.type, getAsFile: () => pdf },
+      { kind: "file", type: docx.type, getAsFile: () => docx },
+    ],
+  });
+  assert.deepEqual(pasted, [md, pdf, docx]);
+  assert.deepEqual(clipboardFiles({ items: [{ kind: "string", type: "text/plain" }], files: [zip] }), [zip]);
+  assert.deepEqual(clipboardFiles({ items: [] }), []);
+  assert.deepEqual(dropFiles({ files: [zip, code, md] }), [zip, code, md]);
+  assert.deepEqual(dropFiles({ files: [], items: [{ kind: "file", type: "", getAsFile: () => code }] }), [code]);
+  assert.deepEqual(dropFiles({ files: [] }), []);
+  assert.equal(dragHasFiles({ types: ["Files"], items: [] }), true);
+  assert.equal(dragHasFiles({ types: [], items: [{ kind: "file", type: "" }] }), true);
+  assert.equal(dragHasFiles({ types: ["text/plain"], items: [{ kind: "string", type: "text/plain" }] }), false);
+  const dropped = takeAttachments(dropFiles({ files: [md, { name: "huge.pdf", size: ATTACH_LIMIT + 1, type: "application/pdf" }, code] }));
+  assert.deepEqual(dropped.accepted.map((item) => item.name), ["notes.md", "main.js"]);
+  assert.match(dropped.errors[0], /huge\.pdf/);
 });
