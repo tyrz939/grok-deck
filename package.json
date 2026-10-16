@@ -1,7 +1,7 @@
 {
   "name": "grok-deck",
-  "private": true,
   "license": "MIT",
+  "private": true,
   "type": "module",
   "description": "Grok Deck: phone and desktop front end for Grok Build",
   "scripts": {

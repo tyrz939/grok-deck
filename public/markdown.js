@@ -140,7 +140,12 @@ function noteCard(title, line) {
 }
 
 function missingCard(label, target) {
-  return noteCard("Image moved or deleted".replace("Image", /\.(png|jpe?g|webp|gif)$/i.test(cleanTarget(target)) ? "Image" : "File"), label || baseName(target));
+  const title = (/\.(png|jpe?g|webp|gif)$/i.test(cleanTarget(target)) ? "Image" : "File") + " moved or deleted";
+  // data-target lets the page look again: the file may not have existed yet when the message arrived.
+  return (
+    '<span class="md-missing" data-target="' + escapeHtml(target) + '" data-label="' + escapeHtml(label || "") + '">' +
+    '<span class="md-missing-title">' + escapeHtml(title) + '</span><span class="md-missing-name">' + escapeHtml(label || baseName(target)) + "</span></span>"
+  );
 }
 
 function limitCard(info) {

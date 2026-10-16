@@ -5,6 +5,7 @@
 //
 // Directives: [[say TEXT]]  [[sleep MS]]  [[exec CODE CMD]]  [[run CMD]] (really runs CMD, records its exit)
 //             [[wake MS TEXT]] (Grok wakes itself MS after the turn)  [[perm]] (asks for approval)
+//             [[ask JSON]] (ask_user_question: {questions:[{question,options:[{label,description}],multiSelect}]})
 //             [[mv FROM TO]]  [[rm FILE]] (files in the working folder)
 //             [[quiettool MS]] (a tool call that stays silent for MS)  [[write PATH TEXT]]  [[commit MSG]]
 import { execSync } from "node:child_process";
@@ -20,6 +21,13 @@ if (process.argv[2] !== "agent") {
   const argv = process.argv.slice(2);
   const packet = argv[argv.indexOf("-p") + 1] || "";
   fs.appendFileSync(path.join(process.env.GROK_HOME, "skeptic.log"), JSON.stringify({ argv: argv.filter((a) => a !== packet), packet }) + "\n");
+  // Real Grok saves a headless `-p` run as a session of its own, in the folder it ran in.
+  if (!process.env.FAKE_NO_HEADLESS_SESSION) {
+    const id = crypto.randomUUID();
+    const dir = path.join(process.env.GROK_HOME, "sessions", encodeURIComponent(process.cwd()), id);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, "summary.json"), JSON.stringify({ info: { id, cwd: process.cwd() }, session_kind: "headless", agent_name: "skeptic", generated_title: "Verify the claims", created_at: new Date().toISOString(), num_messages: 12 }));
+  }
   const kind = (packet.match(/SKFAKE:(\w+)/) || [])[1] || "pass";
   const out = (text, extra = {}) => process.stdout.write(JSON.stringify({ text, stopReason: "end_turn", usage: { total_tokens: 1234 }, total_cost_usd: 0.0123, ...extra }), () => process.exit(0));
   const issue = { severity: "high", title: "Empty input crashes", where: "app.js:3", claim: "handles empty", evidence: "node app.js '' exited 1 with TypeError" };
@@ -62,6 +70,38 @@ const turnDone = (sid) => {
   notify("_x.ai/session_notification", sid, { sessionUpdate: "turn_completed", stop_reason: "end_turn" });
 };
 
+// Like real Grok: each --plugin-dir's skills become slash commands (available_commands_update), and only
+// those without disable-model-invocation would reach the model's skill list (logged to plugins.log).
+const pluginDirs = process.argv.flatMap((a, i) => (a === "--plugin-dir" ? [process.argv[i + 1]] : []));
+const pluginSkills = pluginDirs.flatMap((dir) => {
+  let names = [];
+  try {
+    names = fs.readdirSync(path.join(dir, "skills"));
+  } catch {
+    return [];
+  }
+  return names.flatMap((name) => {
+    const file = path.join(dir, "skills", name, "SKILL.md");
+    try {
+      const head = fs.readFileSync(file, "utf8").split("\n---")[0];
+      const description = ((head.match(/^description:\s*(.*)$/m) || [])[1] || "").replace(/^["']|["']$/g, "");
+      return [{ name, description, file, model: !/^disable-model-invocation:\s*true/m.test(head) }];
+    } catch {
+      return [];
+    }
+  });
+});
+fs.appendFileSync(path.join(home, "plugins.log"), JSON.stringify({ pid: process.pid, dirs: pluginDirs, modelSkills: pluginSkills.filter((s) => s.model).map((s) => s.name) }) + "\n");
+const advertise = (sid) =>
+  notify("session/update", sid, {
+    sessionUpdate: "available_commands_update",
+    availableCommands: [
+      { name: "always-approve", description: "Toggle always-approve mode", input: { hint: "on|off" } },
+      { name: "notes", description: "Keep running notes", input: null, _meta: { scope: "user", path: path.join(home, "skills", "notes", "SKILL.md"), bareName: "notes" } },
+      ...pluginSkills.map((s) => ({ name: s.name, description: s.description, input: null, _meta: { scope: "local", path: s.file, bareName: s.name } })),
+    ],
+  });
+
 function ensureSession(id, cwd) {
   const dir = path.join(home, "sessions", encodeURIComponent(cwd), id);
   fs.mkdirSync(dir, { recursive: true });
@@ -89,6 +129,7 @@ function steps(text, cwd) {
 async function prompt(sid, text, turn) {
   const { cwd } = sessions.get(sid);
   fs.appendFileSync(path.join(home, "prompts.log"), sid + " " + JSON.stringify(text.slice(0, 300)) + "\n");
+  fs.appendFileSync(path.join(home, "prompts-full.jsonl"), JSON.stringify({ sid, text }) + "\n"); // the whole prompt, for tests
   notify("session/update", sid, { sessionUpdate: "user_message_chunk", content: { type: "text", text } });
   let wake = null;
   for (const [kind, arg] of steps(text, cwd)) {
@@ -144,6 +185,16 @@ async function prompt(sid, text, turn) {
       notify("session/update", sid, { sessionUpdate: "tool_call", toolCallId: id, title: "long build", kind: "execute", status: "in_progress", rawInput: { command: "make" } });
       for (let t = 0; t < Number(arg) && !turn.cancelled; t += 200) await sleep(200);
       notify("session/update", sid, { sessionUpdate: "tool_call_update", toolCallId: id, status: "completed" });
+    } else if (kind === "ask") {
+      // ask_user_question as Grok 1.0.50 sends it (captured 13 Oct 2026): the agent then says what it was answered.
+      const spec = JSON.parse(arg);
+      const callId = "call-q" + nextId++;
+      const meta = { "x.ai/tool": { version: 1, name: "ask_user_question", kind: "ask_user", namespace: "grok_build", label: "Ask User", read_only: true } };
+      notify("session/update", spec.child || sid, { sessionUpdate: "tool_call", toolCallId: callId, title: "ask_user_question", rawInput: { questions: spec.questions }, _meta: meta });
+      const result = await request("_x.ai/ask_user_question", { sessionId: spec.child || sid, toolCallId: callId, questions: spec.questions, mode: "default" });
+      const text = result?.outcome === "accepted" ? "User has answered your questions: " + JSON.stringify(result.answers) : "User declined to answer the questions.";
+      notify("session/update", spec.child || sid, { sessionUpdate: "tool_call_update", toolCallId: callId, status: "completed", content: [{ type: "content", content: { type: "text", text } }] });
+      say(sid, "answer:" + JSON.stringify(result));
     } else if (kind === "perm") {
       const result = await request("session/request_permission", {
         sessionId: sid,
@@ -190,11 +241,13 @@ readline.createInterface({ input: process.stdin }).on("line", async (line) => {
     case "session/new": {
       const id = crypto.randomUUID();
       ensureSession(id, p.cwd);
-      return reply({ sessionId: id });
+      reply({ sessionId: id });
+      return advertise(id);
     }
     case "session/load":
       ensureSession(p.sessionId, p.cwd);
-      return reply({});
+      reply({});
+      return advertise(p.sessionId);
     case "session/set_mode":
     case "session/set_config_option":
       return reply({});

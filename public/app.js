@@ -1,4 +1,4 @@
-import { renderMarkdown } from "./markdown.js";
+import { parseMedia, renderMarkdown } from "./markdown.js";
 import { docBody, hydrateEmbeds, sizeText } from "./embeds.js";
 import { applyEvent } from "./reduce.js";
 import { copyText } from "./clipboard.js";
@@ -81,6 +81,7 @@ const app = {
   sending: false,
   draft: { cwd: "", model: "grok-4.7", effort: "high", permissionMode: "default", ultra: false, plan: false, longRun: false, longHours: 12 },
   images: [],
+  files: [],
   imageRoute: "",
   queue: [],
   loops: [],
@@ -97,6 +98,7 @@ const jump = document.getElementById("jump");
 const notice = document.getElementById("notice");
 const thumbs = document.getElementById("thumbs");
 const photos = document.getElementById("photos");
+const filePick = document.getElementById("files");
 const attachBtn = document.getElementById("attach");
 
 function clearImages() {
@@ -104,6 +106,7 @@ function clearImages() {
     if (image.url) URL.revokeObjectURL(image.url);
   }
   app.images = [];
+  app.files = [];
   renderThumbs();
 }
 
@@ -116,9 +119,49 @@ function noteRoute(key) {
   clearImages();
 }
 
+const MAX_FILE_BYTES = 25 * 1024 * 1024;
+const MAX_FILES = 8;
+const FILE_ICON = { pdf: "doc", markdown: "doc", code: "code", video: "video", audio: "audio" };
+
+function filesBusy() {
+  return app.files.some((file) => file.status === "uploading");
+}
+
+// Files ready to send, as the server wants them.
+function readyFiles() {
+  return app.files.filter((file) => file.status === "ready").map((file) => ({ id: file.id, name: file.name }));
+}
+
 function renderThumbs() {
   thumbs.replaceChildren();
-  thumbs.hidden = app.images.length === 0;
+  thumbs.hidden = app.images.length === 0 && app.files.length === 0;
+  for (const file of app.files) {
+    const chip = document.createElement("div");
+    chip.className = "filechip" + (file.status === "uploading" ? " busy" : "");
+    chip.dataset.name = file.name;
+    const icon = document.createElement("span");
+    icon.className = "filechip-icon";
+    icon.append(lineIcon(file.status === "uploading" ? "progress" : FILE_ICON[file.kind] || "file"));
+    const name = document.createElement("span");
+    name.className = "filechip-name";
+    name.textContent = file.name;
+    const meta = document.createElement("span");
+    meta.className = "filechip-meta";
+    meta.textContent = file.status === "uploading" ? "Uploading" : sizeText(file.size);
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "icon-btn filechip-x";
+    remove.setAttribute("aria-label", "Remove " + file.name);
+    remove.append(lineIcon("x"));
+    remove.addEventListener("click", () => {
+      app.files = app.files.filter((item) => item !== file);
+      renderThumbs();
+      growInput();
+      paintSend();
+    });
+    chip.append(icon, name, meta, remove);
+    thumbs.append(chip);
+  }
   for (const image of app.images) {
     const wrap = document.createElement("div");
     wrap.className = "thumb";
@@ -206,19 +249,66 @@ function prepareImage(file) {
   });
 }
 
+async function uploadFile(file) {
+  const entry = { name: file.name || "file", size: file.size, kind: "file", status: "uploading", id: "" };
+  app.files.push(entry);
+  renderThumbs();
+  paintSend();
+  try {
+    const res = await fetch("/api/uploads?name=" + encodeURIComponent(entry.name), {
+      method: "POST",
+      headers: { "Content-Type": "application/octet-stream" },
+      body: file,
+      credentials: "same-origin",
+    });
+    const data = await res.json().catch(() => ({}));
+    if (res.status === 401) {
+      app.files = app.files.filter((item) => item !== entry);
+      closeStream();
+      await showAuth();
+      return;
+    }
+    if (!res.ok) throw new Error(data.error || "Upload failed");
+    Object.assign(entry, { id: data.id, kind: data.kind, name: data.name, size: data.size, status: "ready" });
+  } catch (error) {
+    app.files = app.files.filter((item) => item !== entry);
+    setNotice(entry.name + " could not be attached: " + (error.message || "upload failed"));
+  }
+  renderThumbs();
+  growInput();
+  paintSend();
+}
+
+// Photos keep their own path (shrunk, sent with the message). Any other file is uploaded and attached by its name.
 async function addFiles(files) {
   let rejected = false;
   for (const file of files) {
-    if (!file || !String(file.type || "").startsWith("image/")) continue;
-    if (app.images.length >= 4) {
-      setNotice("Attach up to 4 photos.");
+    if (!file) continue;
+    if (String(file.type || "").startsWith("image/")) {
+      if (app.images.length >= 4) {
+        setNotice("Attach up to 4 photos.");
+        continue;
+      }
+      try {
+        app.images.push(await prepareImage(file));
+      } catch {
+        rejected = true;
+      }
+      continue;
+    }
+    if (app.files.length >= MAX_FILES) {
+      setNotice("Attach up to " + MAX_FILES + " files.");
       break;
     }
-    try {
-      app.images.push(await prepareImage(file));
-    } catch {
-      rejected = true;
+    if (file.size > MAX_FILE_BYTES) {
+      setNotice((file.name || "That file") + " is " + sizeText(file.size) + ", over the " + sizeText(MAX_FILE_BYTES) + " limit.");
+      continue;
     }
+    if (!file.size) {
+      setNotice((file.name || "That file") + " is empty.");
+      continue;
+    }
+    uploadFile(file);
   }
   if (rejected) setNotice("That photo could not be read. Try a JPEG or PNG.");
   renderThumbs();
@@ -231,6 +321,58 @@ function safeDataUrl(image) {
   const data = String(image.data || "").replace(/\s/g, "");
   if (!data || !/^[A-Za-z0-9+/=]+$/.test(data)) return "";
   return "data:" + image.mime + ";base64," + data;
+}
+
+// The files a sent message carried, as the same cards a linked file gets in a reply.
+// A "moved or deleted" card for a reference that may only have been early: ask the server to look again. It copies the
+// file into the store if it is there now, and the card becomes the file. Asked when the card is drawn and when the
+// page comes back into view, and at most every 15 s for one reference otherwise.
+const recheckedAt = new Map();
+async function recheckMissing(root, force) {
+  const id = app.sessionId;
+  if (!id) return;
+  for (const card of root.querySelectorAll(".md-missing[data-target]")) {
+    const target = card.dataset.target;
+    const key = id + "\0" + target;
+    if (!force && Date.now() - (recheckedAt.get(key) || 0) < 15000) continue;
+    recheckedAt.set(key, Date.now());
+    let url = "";
+    try {
+      url = (await api("/api/sessions/" + id + "/media", { method: "POST", body: JSON.stringify({ target }) })).url || "";
+    } catch {
+      continue;
+    }
+    if (!url || !card.isConnected) continue;
+    const label = (card.dataset.label || "").replace(/[\[\]]/g, "");
+    const wrap = document.createElement("div");
+    wrap.innerHTML = renderMarkdown("[" + label + "](" + url + ")");
+    const made = wrap.querySelector("p")?.firstElementChild;
+    if (!made) continue;
+    const msg = card.closest(".msg");
+    card.replaceWith(made);
+    if (msg) hydrateEmbeds(made.parentElement || msg, msg._embeds || (msg._embeds = new Map()), embedUi);
+  }
+}
+
+function renderAttached(node, files) {
+  const key = JSON.stringify((files || []).map((file) => file.id + file.name));
+  if (node._filesKey === key) return;
+  node._filesKey = key;
+  node.querySelector(":scope > .msg-files")?.remove();
+  if (!files || !files.length) return;
+  const box = document.createElement("div");
+  box.className = "msg-files";
+  for (const file of files) {
+    const info = parseMedia("/api/media/" + file.id);
+    const holder = document.createElement("span");
+    holder.className = "embed";
+    holder.dataset.src = "/api/media/" + file.id;
+    holder.dataset.kind = info ? info.kind : "file";
+    holder.dataset.name = file.name;
+    box.append(holder);
+  }
+  hydrateEmbeds(box, node._embeds || (node._embeds = new Map()), embedUi);
+  node.insertBefore(box, node.querySelector(":scope > .msg-actions"));
 }
 
 function renderShots(node, images) {
@@ -376,7 +518,7 @@ function setBanner(mode) {
 function paintPlus() {
   const chat = route().name === "chat";
   const desktopMenu = isDesktop() && chat;
-  const waiting = chat && app.running && !!main.querySelector(".toolcard.asking");
+  const waiting = chat && app.running && !!main.querySelector(".toolcard.asking, .qcard.asking");
   const auto = chat && activeAuto().length > 0;
   const attention = auto || (chat && app.bypass);
   attachBtn.classList.toggle("flag-wait", !desktopMenu && waiting);
@@ -1623,6 +1765,13 @@ function addMsgCopy(node) {
 }
 
 function createMessage(message) {
+  if (message.role === "question") {
+    const node = document.createElement("div");
+    node.className = "qcard";
+    node.dataset.mid = message.id;
+    updateMessage(node, message);
+    return node;
+  }
   if (message.role === "planreview") {
     const node = document.createElement("div");
     node.className = "plancard toolcard";
@@ -1846,6 +1995,10 @@ function renderPermission(node, tool) {
 }
 
 function updateMessage(node, message) {
+  if (message.role === "question") {
+    paintQuestionCard(node, message);
+    return;
+  }
   if (message.role === "planreview") {
     paintPlanCard(node, message);
     return;
@@ -1855,6 +2008,7 @@ function updateMessage(node, message) {
     const text = node.querySelector(".msg-text");
     if (text && text.textContent !== (message.text || "")) text.textContent = message.text || "";
     renderShots(node, message.images);
+    renderAttached(node, message.files);
     return;
   }
   if (message.role === "assistant") {
@@ -1864,6 +2018,7 @@ function updateMessage(node, message) {
       body.innerHTML = renderMarkdown(message.text || "");
       hydrateEmbeds(body, node._embeds || (node._embeds = new Map()), embedUi);
       node._text = message.text;
+      recheckMissing(body, false);
     }
     renderShots(node, message.images);
     return;
@@ -2756,10 +2911,11 @@ async function logout() {
   renderRoute();
 }
 
-async function sendPrompt(prompt, images) {
+async function sendPrompt(prompt, images, files) {
   const where = route();
   const body = { prompt };
   if (images && images.length) body.images = images;
+  if (files && files.length) body.files = files;
   if (where.name === "chat") {
     body.sessionId = where.id;
     if (app.session) {
@@ -2795,7 +2951,12 @@ composer.addEventListener("submit", async (event) => {
   if (app.sending) return;
   const prompt = input.value.trim();
   const images = app.images.map((image) => ({ mime: image.mime, data: image.data }));
-  if (/^\/loops?(\s|$)/i.test(prompt) && !images.length) {
+  const files = readyFiles();
+  if (filesBusy()) {
+    setNotice("Wait for the files to finish uploading.");
+    return;
+  }
+  if (/^\/loops?(\s|$)/i.test(prompt) && !images.length && !files.length) {
     app.sending = true;
     try {
       await sendLoopCommand(prompt);
@@ -2808,10 +2969,10 @@ composer.addEventListener("submit", async (event) => {
   }
   if (app.running && route().name === "chat") {
     // Desktop Enter / requestSubmit: queue as Send next. The button itself does Stop / Send now.
-    if (!prompt && !images.length) return;
+    if (!prompt && !images.length && !files.length) return;
     app.sending = true;
     try {
-      const body = { prompt, images, model: app.session?.model, effort: app.session?.effort, permissionMode: app.session?.permissionMode, ultra: !!app.session?.ultra };
+      const body = { prompt, images, files, model: app.session?.model, effort: app.session?.effort, permissionMode: app.session?.permissionMode, ultra: !!app.session?.ultra };
       const saved = await api("/api/sessions/" + app.sessionId + "/queue", { method: "POST", body: JSON.stringify(body) });
       app.queue = saved.queue || [];
       input.value = "";
@@ -2825,8 +2986,8 @@ composer.addEventListener("submit", async (event) => {
     }
     return;
   }
-  if (!prompt && !images.length) {
-    setNotice("Write a message or attach a photo.");
+  if (!prompt && !images.length && !files.length) {
+    setNotice("Write a message or attach a file.");
     return;
   }
   const where = route();
@@ -2839,7 +3000,7 @@ composer.addEventListener("submit", async (event) => {
   const missing = document.getElementById("missing-dir");
   if (missing) missing.remove();
   try {
-    await sendPrompt(prompt, images);
+    await sendPrompt(prompt, images, files);
     input.value = "";
     clearImages();
     app.imageRoute = "chat:" + (route().id || "");
@@ -2890,6 +3051,152 @@ function showMissingDir(dir) {
 }
 
 // Plan mode: Grok's plan arrives as a card with Approve plan / Revise.
+// Grok's ask_user_question: one card, a button per option, a text field for "Other", and Send. A single question with
+// one choice answers on the tap. The answer goes back to the agent exactly as given; Skip tells it the user declined.
+function paintQuestionCard(node, message) {
+  const key = message.status + "|" + app.running;
+  if (node._key === key) return;
+  node._key = key;
+  const waiting = message.status === "waiting" && app.running;
+  node.classList.toggle("asking", waiting);
+  node.classList.toggle("answered", message.status === "answered");
+  node.replaceChildren();
+  const head = document.createElement("div");
+  head.className = "q-head";
+  head.textContent = waiting
+    ? (message.from ? message.from + " asks" : "Grok asks")
+    : message.status === "answered" ? "You answered" : message.status === "cancelled" && message.by === "user" ? "You skipped this" : "Not answered";
+  node.append(head);
+  const questions = message.questions || [];
+  const picked = questions.map(() => new Set());
+  const typed = questions.map(() => "");
+  const block = [];
+  questions.forEach((q, qi) => {
+    const wrap = document.createElement("div");
+    wrap.className = "q-block";
+    const text = document.createElement("div");
+    text.className = "q-text";
+    text.textContent = q.question;
+    wrap.append(text);
+    if (!waiting) {
+      if (message.status === "answered") {
+        const answer = document.createElement("div");
+        answer.className = "q-answer";
+        const given = (message.answers || [])[qi];
+        answer.textContent = Array.isArray(given) ? given.join(", ") : String(given ?? "");
+        wrap.append(answer);
+      }
+      node.append(wrap);
+      return;
+    }
+    const opts = document.createElement("div");
+    opts.className = "q-opts";
+    opts.setAttribute("role", "group");
+    opts.setAttribute("aria-label", q.question);
+    const optButtons = [];
+    for (const option of q.options) {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "q-opt";
+      b.setAttribute("aria-pressed", "false");
+      const mark = document.createElement("span");
+      mark.className = "q-mark";
+      mark.append(lineIcon("check"));
+      const words = document.createElement("span");
+      words.className = "q-words";
+      const label = document.createElement("span");
+      label.className = "q-label";
+      label.textContent = option.label;
+      words.append(label);
+      if (option.description && option.description !== option.label) {
+        const d = document.createElement("span");
+        d.className = "q-desc";
+        d.textContent = option.description;
+        words.append(d);
+      }
+      b.append(mark, words);
+      b.addEventListener("click", () => {
+        if (q.multiSelect) {
+          if (picked[qi].has(option.label)) picked[qi].delete(option.label);
+          else picked[qi].add(option.label);
+        } else {
+          picked[qi].clear();
+          picked[qi].add(option.label);
+          typed[qi] = "";
+          other.value = "";
+        }
+        paint();
+        if (questions.length === 1 && !q.multiSelect) send();
+      });
+      optButtons.push([b, option.label]);
+      opts.append(b);
+    }
+    const other = document.createElement("input");
+    other.type = "text";
+    other.className = "q-other";
+    other.placeholder = "Other";
+    other.setAttribute("aria-label", "Other answer for: " + q.question);
+    other.autocomplete = "off";
+    other.addEventListener("input", () => {
+      typed[qi] = other.value;
+      if (!q.multiSelect && other.value.trim()) picked[qi].clear();
+      paint();
+    });
+    other.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && ready()) {
+        event.preventDefault();
+        send();
+      }
+    });
+    wrap.append(opts, other);
+    block.push(() => {
+      for (const [b, label] of optButtons) b.setAttribute("aria-pressed", picked[qi].has(label) ? "true" : "false");
+    });
+    node.append(wrap);
+  });
+  if (!waiting) return;
+  const values = () => questions.map((q, qi) => {
+    const list = [...picked[qi]];
+    if (typed[qi].trim()) list.push(typed[qi].trim());
+    return q.multiSelect ? list : list[0] || "";
+  });
+  const ready = () => values().every((v) => (Array.isArray(v) ? v.length : !!v));
+  const row = document.createElement("div");
+  row.className = "q-actions";
+  let sending = false;
+  const submit = async (body) => {
+    if (sending) return;
+    sending = true;
+    for (const b of node.querySelectorAll("button, input")) b.disabled = true;
+    try {
+      await api("/api/sessions/" + app.sessionId + "/question", { method: "POST", body: JSON.stringify({ reqId: message.reqId, ...body }) });
+    } catch (error) {
+      if (error.status === 409) {
+        row.replaceChildren();
+        const done = document.createElement("p");
+        done.className = "perm-note";
+        done.textContent = "Already answered on another device.";
+        row.append(done);
+        return;
+      }
+      sending = false;
+      for (const b of node.querySelectorAll("button, input")) b.disabled = false;
+      paint();
+      if (!error.auth) setNotice(error.message);
+    }
+  };
+  const send = () => ready() && submit({ answers: values() });
+  const sendBtn2 = button("Send answer", send, "primary q-send");
+  const skip = button("Skip", () => submit({ cancel: true }), "revise q-skip");
+  row.append(skip, sendBtn2);
+  node.append(row);
+  function paint() {
+    for (const fn of block) fn();
+    sendBtn2.disabled = !ready() || sending;
+  }
+  paint();
+}
+
 function paintPlanCard(node, message) {
   const key = message.status + "|" + message.plan.length + "|" + app.running;
   if (node._key === key) return;
@@ -3311,7 +3618,7 @@ async function chooseLongRun() {
 // "Send next" stays on form submit / desktop Enter, not on this button.
 function paintSend() {
   const chat = route().name === "chat";
-  const hasContent = hasComposerContent(input.value, app.images.length);
+  const hasContent = hasComposerContent(input.value, app.images.length + app.files.length);
   const { label, mode } = composerAction({ running: app.running, chat, hasContent });
   if (sendBtn.textContent !== label) sendBtn.textContent = label;
   sendBtn.classList.toggle("stop-mode", mode === "stop");
@@ -3559,6 +3866,7 @@ const sheet = document.getElementById("sheet");
 const sheetPanel = sheet.querySelector(".sheet-panel");
 
 function closeSheet() {
+  skillsOpen = false;
   sheet.hidden = true;
   sheetPanel.replaceChildren();
   sheetPanel.removeAttribute("style");
@@ -3570,9 +3878,13 @@ sheet.addEventListener("click", (event) => {
 
 async function menuItems() {
   const chat = route().name === "chat";
-  const items = [{ label: "Add photo", icon: "photo", run: () => { closeSheet(); photos.click(); } }];
+  const items = [
+    { label: "Add photo", icon: "photo", run: () => { closeSheet(); photos.click(); } },
+    { label: "Choose file", icon: "file", run: () => { closeSheet(); filePick.click(); } },
+    { label: "Skills", icon: "sparkle", run: () => openSkills("", attachBtn) },
+  ];
   if (chat) {
-    const waiting = main.querySelector(".toolcard.asking");
+    const waiting = main.querySelector(".toolcard.asking, .qcard.asking");
     if (waiting && app.running) items.unshift({ label: "Go to approval", icon: "approve", accent: true, run: () => { closeSheet(); waiting.scrollIntoView({ block: "center", behavior: "smooth" }); } });
     items.push(skepticMenuRow());
     if (activeAuto().length) items.push({ label: "Auto approve on · Turn off", icon: "bolt", accent: true, run: () => { closeSheet(); setAuto([]); } });
@@ -3704,6 +4016,59 @@ async function sendLoopCommand(text) {
 // An item is { label, icon, run, selected, danger, accent }, { text, info } for a caption, or { node } for a form.
 let sheetAnchor = null;
 
+// Skills are Grok's own list (name and one-line description; the full SKILL.md loads only when used).
+// Typing / at the start of the field filters it; a pick puts "/name " in the field, sent to Grok as typed.
+let skillsOpen = false;
+let skillList = null;
+
+async function loadSkills() {
+  const key = app.sessionId || "";
+  if (skillList?.key === key) return skillList;
+  try {
+    const data = await api("/api/skills" + (key ? "?session=" + key : ""));
+    skillList = { key, skills: data.skills || [], credit: data.credit || "" };
+  } catch {
+    skillList = { key, skills: [], credit: "" };
+  }
+  return skillList;
+}
+
+function slashQuery() {
+  const m = /^\/(\S*)$/.exec(input.value);
+  return m ? m[1].toLowerCase() : null;
+}
+
+function matchingSkills(skills, query) {
+  const q = query || "";
+  const hit = skills.filter((s) => s.name.toLowerCase().includes(q));
+  return q ? [...hit.filter((s) => s.name.toLowerCase().startsWith(q)), ...hit.filter((s) => !s.name.toLowerCase().startsWith(q))] : hit;
+}
+
+function pickSkill(skill) {
+  closeSheet();
+  input.value = "/" + skill.name + " ";
+  input.focus();
+  growInput();
+  paintSend();
+}
+
+async function openSkills(query, anchor) {
+  const { skills, credit } = await loadSkills();
+  const shown = matchingSkills(skills, query);
+  const row = (s) => ({ label: "/" + s.name, detail: s.description, icon: "sparkle", run: () => pickSkill(s) });
+  const items = query ? [] : [{ text: "Grok reads a skill only when a task calls for it or you send /name.", info: true }];
+  const pstack = shown.filter((s) => s.source === "pstack");
+  const other = shown.filter((s) => s.source !== "pstack");
+  if (pstack.length) items.push({ text: credit, info: true }, ...pstack.map(row));
+  if (other.length) items.push({ text: "Other skills", info: true }, ...other.map(row));
+  if (!shown.length) items.push({ text: skills.length ? "No skill matches /" + query + "." : "No skills loaded.", info: true });
+  // The list may arrive after the field changed; only the latest query paints.
+  if (anchor === input && slashQuery() !== query) return;
+  await openSheet(items, anchor);
+  skillsOpen = true;
+  return shown;
+}
+
 function menuRow(item) {
   const el = button("", item.run, "sheet-item" + (item.danger ? " danger" : "") + (item.accent ? " accent" : ""));
   if (item.title) el.title = item.title;
@@ -3713,6 +4078,12 @@ function menuRow(item) {
   const label = document.createElement("span");
   label.className = "sheet-label";
   label.textContent = item.label;
+  if (item.detail) {
+    const detail = document.createElement("small");
+    detail.className = "sheet-detail";
+    detail.textContent = item.detail;
+    label.append(detail);
+  }
   el.append(label);
   if (item.selected) {
     const mark = lineIcon("check");
@@ -3789,6 +4160,15 @@ input.addEventListener("keydown", (event) => {
   if (event.key !== "Enter") return;
   // IME composition: let the input method finish (isComposing, or keyCode 229).
   if (event.isComposing || event.keyCode === 229) return;
+  // Enter in the / picker takes the best match instead of sending a half-typed name.
+  if (skillsOpen && slashQuery() !== null && skillList) {
+    const best = matchingSkills(skillList.skills, slashQuery())[0];
+    if (best) {
+      event.preventDefault();
+      pickSkill(best);
+      return;
+    }
+  }
   const modSend = event.metaKey || event.ctrlKey;
   const desktopSend = isFinePointerDesktop() && !event.shiftKey;
   if (!modSend && !desktopSend) return;
@@ -3800,6 +4180,9 @@ input.addEventListener("keydown", (event) => {
 input.addEventListener("input", () => {
   growInput();
   paintSend();
+  const query = slashQuery();
+  if (query !== null) openSkills(query, input);
+  else if (skillsOpen) closeSheet();
 });
 
 attachBtn.addEventListener("click", () => openSheet(undefined, attachBtn));
@@ -3810,22 +4193,29 @@ photos.addEventListener("change", () => {
   addFiles(files);
 });
 
+filePick.addEventListener("change", () => {
+  const files = [...(filePick.files || [])];
+  filePick.value = "";
+  addFiles(files);
+});
+
+const hasFiles = (event) => [...(event.dataTransfer?.types || [])].includes("Files");
+
 document.addEventListener("paste", (event) => {
   if (composer.hidden) return;
   const items = [...(event.clipboardData?.items || [])];
-  const images = items.filter((item) => item.kind === "file" && String(item.type || "").startsWith("image/"));
-  if (!images.length) return;
+  const files = items.filter((item) => item.kind === "file").map((item) => item.getAsFile()).filter(Boolean);
+  if (!files.length) return;
   event.preventDefault();
-  addFiles(images.map((item) => item.getAsFile()).filter(Boolean));
+  addFiles(files);
 });
 
 composer.addEventListener("dragover", (event) => {
-  const items = [...(event.dataTransfer?.items || [])];
-  if (items.some((item) => String(item.type || "").startsWith("image/"))) event.preventDefault();
+  if (hasFiles(event)) event.preventDefault();
 });
 
 composer.addEventListener("drop", (event) => {
-  const files = [...(event.dataTransfer?.files || [])].filter((file) => String(file.type || "").startsWith("image/"));
+  const files = [...(event.dataTransfer?.files || [])];
   if (!files.length) return;
   event.preventDefault();
   addFiles(files);
@@ -3847,8 +4237,13 @@ async function sendNowFromComposer() {
   if (app.sending || !app.sessionId) return;
   const prompt = input.value.trim();
   const images = app.images.map((image) => ({ mime: image.mime, data: image.data }));
-  if (!prompt && !images.length) return;
-  if (/^\/loops?(\s|$)/i.test(prompt) && !images.length) {
+  const files = readyFiles();
+  if (filesBusy()) {
+    setNotice("Wait for the files to finish uploading.");
+    return;
+  }
+  if (!prompt && !images.length && !files.length) return;
+  if (/^\/loops?(\s|$)/i.test(prompt) && !images.length && !files.length) {
     composer.requestSubmit(); // a /loop command never interrupts the running turn
     return;
   }
@@ -3858,6 +4253,7 @@ async function sendNowFromComposer() {
     const body = {
       prompt,
       images,
+      files,
       model: app.session?.model,
       effort: app.session?.effort,
       permissionMode: app.session?.permissionMode,
@@ -3886,7 +4282,7 @@ async function sendNowFromComposer() {
 sendBtn.addEventListener("click", (event) => {
   if (!app.running || route().name !== "chat") return;
   event.preventDefault();
-  if (!hasComposerContent(input.value, app.images.length)) stopTurn();
+  if (!hasComposerContent(input.value, app.images.length + app.files.length)) stopTurn();
   else sendNowFromComposer();
 });
 
@@ -3916,6 +4312,7 @@ docview.addEventListener("click", copyCodeClick);
 
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState !== "visible") return;
+  if (route().name === "chat") recheckMissing(main, true);
   if (document.querySelector(".plan-usage") && Date.now() - planAt >= PLAN_MS) notePlanUsageStale();
   refreshTheme();
   const where = route();
@@ -4320,6 +4717,7 @@ function showKeys() {
     ["Esc", "Close panels and menus"],
     ["?", "This help"],
     ["Paste or drop", "Attach images"],
+    ["/", "Skills, with pstack by Lauren Tan (poteto); Enter picks the top match"],
   ];
   const dl = document.createElement("dl");
   for (const [k, v] of rows) {
@@ -4407,10 +4805,10 @@ document.addEventListener("keydown", (event) => {
   }
 });
 
-// Drop images anywhere in the window on desktop.
+// Drop files anywhere in the window on desktop.
 document.addEventListener("dragover", (event) => {
   if (composer.hidden) return;
-  if ([...(event.dataTransfer?.items || [])].some((i) => String(i.type || "").startsWith("image/"))) {
+  if (hasFiles(event)) {
     event.preventDefault();
     document.body.classList.add("dropping");
   }
@@ -4421,7 +4819,7 @@ document.addEventListener("dragleave", (event) => {
 document.addEventListener("drop", (event) => {
   document.body.classList.remove("dropping");
   if (composer.hidden || event.defaultPrevented) return;
-  const files = [...(event.dataTransfer?.files || [])].filter((f) => String(f.type || "").startsWith("image/"));
+  const files = [...(event.dataTransfer?.files || [])];
   if (!files.length) return;
   event.preventDefault();
   addFiles(files);

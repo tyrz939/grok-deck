@@ -177,6 +177,7 @@ function startServer() {
       GM_STALL_CHECK_MS: "500",
       GM_RESUME_DELAY_MS: "300",
       GM_ACP_SETUP_TIMEOUT_MS: "2000",
+      GM_QUESTION_TIMEOUT_MS: "15000", // an unanswered question gives up after this long
       GM_QUEUE_RETRY_MS: "500",
       GM_QUEUE_SWEEP_MS: "1000",
       GM_SSE_PING_MS: "1000",
@@ -261,7 +262,7 @@ async function readStream(id, after, stopWhen, ms = 15000) {
 }
 
 const results = [];
-const SHOTS = path.join(process.env.HOME || "", "Projects/grok-deck/shots");
+const SHOTS = path.join(process.env.HOME || "/home/user", "Projects/grok-deck/shots");
 fs.mkdirSync(SHOTS, { recursive: true });
 
 async function loadChromium(label) {
@@ -846,6 +847,42 @@ try {
     assert.match(calls[0].packet, /Done, fixed the crash/);
     assert.match(calls[0].packet, /nothing ran after the last edit/i);
     assert.equal((await api("GET", "/api/sessions/" + skId + "/usage")).json.skeptic.reviews, 1);
+  });
+
+  await check("a review run creates no new top-level session: its headless session is tagged with its parent and kept out of the list", async () => {
+    await api("PATCH", "/api/skeptic/settings", { mode: "auto" });
+    // 13 Oct 2026: the reviewer's `grok -p` run was saved by Grok as a session of its own and listed beside the one it reviewed.
+    const ids = async () => (await api("GET", "/api/sessions")).json.sessions.map((row) => row.id);
+    const before = new Set(await ids());
+    const headless = () => {
+      const out = [];
+      const root = path.join(GHOME, "sessions");
+      for (const group of fs.existsSync(root) ? fs.readdirSync(root) : []) {
+        for (const child of fs.readdirSync(path.join(root, group))) {
+          const file = path.join(root, group, child, "summary.json");
+          if (fs.existsSync(file) && JSON.parse(fs.readFileSync(file, "utf8")).session_kind === "headless") out.push(child);
+        }
+      }
+      return out;
+    };
+    const had = headless().length;
+    const parent = await skTurn(skProject("sk-nolist"), "Done, fixed the crash. SKFAKE:pass", { run: false });
+    const verdict = await waitFor(async () => {
+      const s = await skState(parent);
+      return s && s.state !== "running" && s;
+    }, 15000, "skeptic verdict");
+    assert.equal(verdict.state, "pass");
+    const made = headless();
+    assert.equal(made.length, had + 1, "Grok did save the reviewer's run as a session on disk");
+    const after = await ids();
+    assert.deepEqual(after.filter((id) => !before.has(id)), [parent], "the only new session in the list is the one that was reviewed");
+    for (const id of made) assert.ok(!after.includes(id), "a headless session is not listed: " + id);
+    // The run is tagged with the session it served.
+    const meta = JSON.parse(fs.readFileSync(path.join(DATA, "meta.json"), "utf8"));
+    const tagged = Object.entries(meta.helpers || {}).filter(([, tag]) => tag.parent === parent);
+    assert.equal(tagged.length, 1);
+    assert.equal(tagged[0][1].kind, "review");
+    assert.ok(made.includes(tagged[0][0]));
   });
 
   await check("open chat watch receives the skeptic verdict", async () => {
@@ -2377,6 +2414,103 @@ try {
     return { id: created.json.sessionId, dir };
   };
 
+  await check("skills: every session loads all of pstack as model-invocable skills; / in the composer lists them with descriptions; a pick is sent as typed", async () => {
+    const vendored = path.join(here, "..", "vendor", "cursor-plugins", "pstack", "skills");
+    const names = fs.readdirSync(vendored).filter((n) => fs.existsSync(path.join(vendored, n, "SKILL.md")));
+    assert.ok(names.length >= 40, "pstack is checked out: " + names.length);
+    const plugins = () => fs.readFileSync(path.join(GHOME, "plugins.log"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+    const dir = project("skills");
+    const started = await api("POST", "/api/turns", { cwd: dir, prompt: "[[say hello]]", permissionMode: "default", skeptic: "off" });
+    assert.equal(started.status, 200, JSON.stringify(started.json));
+    const id = started.json.sessionId;
+    await idle(id);
+    const load = plugins().at(-1);
+    assert.equal(load.dirs.length, 1, JSON.stringify(load.dirs));
+    assert.ok(load.dirs[0].startsWith(path.join(DATA, "plugins", "pstack-")), load.dirs[0]);
+    // Grok would put every pstack skill in the model's list (name and description only); the vendored copy stays user-only.
+    assert.deepEqual([...load.modelSkills].sort(), [...names].sort());
+    assert.match(fs.readFileSync(path.join(vendored, "poteto-mode", "SKILL.md"), "utf8"), /^disable-model-invocation: true/m);
+    const listed = await api("GET", "/api/skills?session=" + id);
+    assert.equal(listed.status, 200);
+    const byName = new Map(listed.json.skills.map((s) => [s.name, s]));
+    for (const n of names) assert.equal(byName.get(n)?.source, "pstack", n);
+    assert.match(byName.get("tdd").description, /TDD/);
+    assert.equal(byName.has("always-approve"), false, "built-in commands are not offered");
+    assert.match(listed.json.credit, /Lauren Tan \(poteto\)/);
+    const fresh = await api("GET", "/api/skills");
+    assert.ok(fresh.json.skills.some((s) => s.name === "poteto-mode"), "a new chat has the list too");
+
+    const chromium = await loadChromium("skills");
+    if (!chromium) return;
+    const browser = await launchChromium(chromium);
+    try {
+      const token = cookie.split("=")[1];
+      for (const [width, height] of [[390, 844], [1440, 900]]) {
+        const page = await browser.newPage({ viewport: { width, height }, deviceScaleFactor: 1 });
+        await page.context().addCookies([{ name: "gm_session", value: token, url: BASE, httpOnly: true, sameSite: "Strict" }]);
+        await page.goto(BASE + "/s/" + id, { waitUntil: "domcontentloaded" });
+        await page.waitForSelector("#optbar:not([hidden])");
+        await page.locator("#input").click();
+        await page.keyboard.type("/");
+        await page.waitForSelector("#sheet:not([hidden]) .sheet-panel .sheet-detail");
+        const all = await page.locator("#sheet").innerText();
+        assert.match(all, /Lauren Tan \(poteto\)/);
+        assert.match(all, /only when a task calls for it/);
+        assert.match(all, /Other skills/);
+        assert.ok((await page.locator("#sheet .sheet-item").count()) >= names.length);
+        // A long list scrolls inside the panel; rows never squash into each other.
+        const squash = await page.evaluate(() => {
+          const panel = document.querySelector("#sheet .sheet-panel");
+          const rows = [...panel.querySelectorAll(".sheet-item")];
+          const bad = [];
+          rows.forEach((row, i) => {
+            const r = row.getBoundingClientRect();
+            const inner = row.querySelector(".sheet-label").getBoundingClientRect();
+            if (inner.bottom > r.bottom + 0.5 || inner.top < r.top - 0.5) bad.push("text spills out of " + row.textContent.slice(0, 30));
+            const next = rows[i + 1]?.getBoundingClientRect();
+            if (next && next.top < r.bottom - 0.5) bad.push("row " + i + " overlaps the next");
+          });
+          if (panel.scrollHeight <= panel.clientHeight) bad.push("the full list does not scroll");
+          return bad;
+        });
+        assert.deepEqual(squash, []);
+        await page.keyboard.type("tdd");
+        await page.waitForFunction(() => document.querySelector("#sheet .sheet-item .sheet-label")?.firstChild?.textContent === "/tdd");
+        assert.match(await page.locator("#sheet .sheet-item").first().locator(".sheet-detail").innerText(), /TDD/);
+        if (width === 390) await page.screenshot({ path: path.join(SHOTS, "skills-390.png") });
+        else await page.screenshot({ path: path.join(SHOTS, "skills-1440.png") });
+        assert.deepEqual(await paintedOverlaps(page), []);
+        const box = await page.evaluate(() => ({ panel: document.querySelector("#sheet .sheet-panel").getBoundingClientRect().bottom, input: document.querySelector("#input").getBoundingClientRect().top, scroll: document.documentElement.scrollWidth, w: window.innerWidth }));
+        assert.ok(box.panel <= box.input, "the picker sits above the field " + JSON.stringify(box));
+        assert.ok(box.scroll <= box.w, "no sideways scroll " + JSON.stringify(box));
+        if (width === 390) await page.locator("#sheet .sheet-item").first().click();
+        else await page.keyboard.press("Enter");
+        await page.waitForSelector("#sheet", { state: "hidden" });
+        assert.equal(await page.locator("#input").inputValue(), "/tdd ");
+        await page.keyboard.type("fix the parser [[say on it]]");
+        await page.locator("#send").click();
+        await waitFor(() => fs.readFileSync(path.join(GHOME, "prompts-full.jsonl"), "utf8").includes('"text":"/tdd fix the parser [[say on it]]"'), 8000, "the /tdd prompt to reach Grok");
+        await idle(id);
+        // The + menu has the same list, for a phone without a keyboard.
+        await page.locator("#attach").click();
+        await page.locator("#sheet .sheet-item").filter({ hasText: /^Skills$/ }).click();
+        await page.waitForSelector("#sheet:not([hidden]) .sheet-detail");
+        await page.locator("#sheet .sheet-item").filter({ hasText: /^\/poteto-mode/ }).click();
+        assert.equal(await page.locator("#input").inputValue(), "/poteto-mode ");
+        await page.close();
+      }
+    } finally {
+      await browser.close();
+    }
+    // Ultra keeps its own plugin on top of the skills.
+    const ultra = await api("POST", "/api/turns", { cwd: project("skills-ultra"), prompt: "[[say ultra]]", permissionMode: "default", ultra: true, skeptic: "off" });
+    assert.equal(ultra.status, 200, JSON.stringify(ultra.json));
+    await idle(ultra.json.sessionId);
+    const u = plugins().at(-1);
+    assert.equal(u.dirs.length, 2, JSON.stringify(u.dirs));
+    assert.ok(u.dirs[0].startsWith(path.join(DATA, "plugins", "pstack-")) && u.dirs[1].endsWith("ultra-plugin"), JSON.stringify(u.dirs));
+  });
+
   await check("consistency: spacing, radii, icons, contrast, duplicates and active states on every screen", async () => {
     const dir = project("audit");
     const made = [];
@@ -2389,6 +2523,17 @@ try {
     });
     for (const id of [...made, richAudit.json.sessionId]) await idle(id);
     const embedsAudit = await makeEmbeds("audit-embeds");
+    const auditSrc = path.join(tmp, "audit-src");
+    fs.mkdirSync(auditSrc, { recursive: true });
+    fs.writeFileSync(path.join(auditSrc, "notes.md"), "# Notes\n\nA line of text.\n");
+    fs.writeFileSync(path.join(auditSrc, "bundle.zip"), Buffer.alloc(2000, 3));
+    const auditUploads = [];
+    for (const [name, body] of [["notes.md", "# Notes\n\nA line of text.\n"], ["tool.py", "def run():\n    return 42\n"], ["bundle.zip", Buffer.alloc(2000, 3)]]) {
+      const made = await (await fetch(BASE + "/api/uploads?name=" + name, { method: "POST", headers: { Cookie: cookie, "Content-Type": "application/octet-stream" }, body })).json();
+      auditUploads.push({ id: made.id, name: made.name });
+    }
+    const attachedAudit = await api("POST", "/api/turns", { cwd: dir, prompt: "[[say got the files]]", files: auditUploads, permissionMode: "default", skeptic: "off" });
+    await idle(attachedAudit.json.sessionId);
     const askAudit = await api("POST", "/api/turns", { cwd: dir, prompt: "[[perm]]", permissionMode: "default", skeptic: "off" });
     await waitFor(async () => (await session(askAudit.json.sessionId)).running, 5000, "approval turn");
     const chromium = await loadChromium("audit");
@@ -2534,10 +2679,24 @@ try {
           await page.waitForSelector("#docview:not([hidden]) .md-doc");
           await scan("document full screen");
           await page.locator("#docview .docview-close").click();
+          await page.goto(BASE + "/s/" + attachedAudit.json.sessionId, { waitUntil: "domcontentloaded" });
+          await page.waitForSelector(".msg.user .msg-files .embed-card");
+          await page.waitForSelector(".msg.user .msg-files .md-doc");
+          await scan("sent attachments");
+          await page.locator("#files").setInputFiles([path.join(auditSrc, "notes.md"), path.join(auditSrc, "bundle.zip")]);
+          await page.waitForFunction(() => document.querySelectorAll("#thumbs .filechip:not(.busy)").length === 2);
+          await scan("composer attachments");
           await page.goto(BASE + "/s/" + askAudit.json.sessionId, { waitUntil: "domcontentloaded" });
           await page.waitForSelector(".perm, .toolcard.asking", { timeout: 8000 }).catch(() => {});
           await page.waitForTimeout(400);
           await scan("approval");
+          const asked = await api("POST", "/api/turns", { cwd: dir, prompt: "[[ask " + JSON.stringify({ questions: [{ question: "Which colours do you like?", multiSelect: true, options: [{ label: "Red", description: "A warm one" }, { label: "Blue", description: "Blue" }] }, { question: "Which size?", multiSelect: null, options: [{ label: "Small", description: "Small" }] }] }) + "]]", permissionMode: "default", skeptic: "off" });
+          await waitFor(async () => (await session(asked.json.sessionId)).messages.some((m) => m.role === "question" && m.status === "waiting"), 8000, "audit question");
+          await page.goto(BASE + "/s/" + asked.json.sessionId, { waitUntil: "domcontentloaded" });
+          await page.waitForSelector(".qcard.asking");
+          await page.locator(".qcard .q-opt").first().click();
+          await scan("question");
+          await api("POST", "/api/sessions/" + asked.json.sessionId + "/cancel", {});
           await page.goto(BASE + "/s/" + made[0], { waitUntil: "domcontentloaded" });
           await page.waitForSelector("#optbar:not([hidden])");
           for (const [name, trigger] of [["plus", "#attach"], ["mode", "#optbar [data-mode]"], ["reason", "#optbar [data-reasoning]"], ["cog", ".opt-cog"]]) {
@@ -2546,6 +2705,12 @@ try {
             await scan("popover " + name);
             await page.keyboard.press("Escape");
           }
+          await page.locator("#input").click();
+          await page.keyboard.type("/");
+          await page.waitForSelector("#sheet:not([hidden]) .sheet-detail");
+          await scan("skills picker");
+          await page.keyboard.press("Escape");
+          await page.locator("#input").fill("");
           await openSessionSettings(page);
           await page.waitForSelector("#setsheet:not([hidden]) .swatch");
           await scan("session settings");
@@ -2837,6 +3002,461 @@ try {
     } finally {
       await browser.close();
     }
+  });
+
+  // Attachments: any file goes in through +, paste or drop, is stored, copied into the working folder and read into the prompt.
+  const zipOf = (files) => {
+    const parts = [];
+    const central = [];
+    let offset = 0;
+    for (const [name, content] of Object.entries(files)) {
+      const data = Buffer.from(content);
+      const nameBuf = Buffer.from(name);
+      const local = Buffer.alloc(30);
+      local.writeUInt32LE(0x04034b50, 0); local.writeUInt16LE(20, 4); local.writeUInt32LE(data.length, 18); local.writeUInt32LE(data.length, 22); local.writeUInt16LE(nameBuf.length, 26);
+      parts.push(local, nameBuf, data);
+      const entry = Buffer.alloc(46);
+      entry.writeUInt32LE(0x02014b50, 0); entry.writeUInt16LE(20, 4); entry.writeUInt16LE(20, 6); entry.writeUInt32LE(data.length, 20); entry.writeUInt32LE(data.length, 24); entry.writeUInt16LE(nameBuf.length, 28); entry.writeUInt32LE(offset, 42);
+      central.push(entry, nameBuf);
+      offset += 30 + nameBuf.length + data.length;
+    }
+    const dir = Buffer.concat(central);
+    const end = Buffer.alloc(22);
+    end.writeUInt32LE(0x06054b50, 0); end.writeUInt16LE(Object.keys(files).length, 8); end.writeUInt16LE(Object.keys(files).length, 10); end.writeUInt32LE(dir.length, 12); end.writeUInt32LE(offset, 16);
+    return Buffer.concat([...parts, dir, end]);
+  };
+  const textPdf = () => {
+    const stream = "BT /F1 18 Tf 20 100 Td (Hello PDF text from the spec) Tj ET";
+    return Buffer.from("%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 300 200]/Contents 4 0 R/Resources<</Font<</F1 5 0 R>>>>>>endobj\n4 0 obj<</Length " + stream.length + ">>stream\n" + stream + "\nendstream endobj\n5 0 obj<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>endobj\ntrailer<</Root 1 0 R/Size 6>>\n");
+  };
+  const attachDir = path.join(tmp, "attach-src");
+  fs.mkdirSync(attachDir, { recursive: true });
+  const attachFiles = {
+    "notes.md": Buffer.from("# Launch notes\n\nThe launch token is ZEBRA-4471.\n"),
+    "table.csv": Buffer.from("name,qty\nwidget,12\n"),
+    "spec.pdf": textPdf(),
+    "plan.docx": zipOf({ "word/document.xml": "<w:document><w:body><w:p><w:r><w:t>Plan token PELICAN-9</w:t></w:r></w:p></w:body></w:document>" }),
+    "bundle.zip": Buffer.alloc(3000, 7),
+    "tool.py": Buffer.from("def run():\n    return 42\n"),
+  };
+  for (const [name, body] of Object.entries(attachFiles)) fs.writeFileSync(path.join(attachDir, name), body);
+  const attachSrc = (...names) => names.map((n) => path.join(attachDir, n));
+  const fullPrompts = (id) => (fs.existsSync(path.join(GHOME, "prompts-full.jsonl")) ? fs.readFileSync(path.join(GHOME, "prompts-full.jsonl"), "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l)).filter((r) => r.sid === id) : []);
+  const attachPage = async (browser, width, height, url) => {
+    const page = await browser.newPage({ viewport: { width, height }, deviceScaleFactor: 1 });
+    await page.context().addCookies([{ name: "gm_session", value: cookie.split("=")[1], url: BASE, httpOnly: true, sameSite: "Strict" }]);
+    await page.goto(BASE + url, { waitUntil: "domcontentloaded" });
+    await page.waitForSelector("#optbar:not([hidden])");
+    return page;
+  };
+  let attached = null;
+
+  await check("attach: several files of any type become chips, can be removed, and reach the agent with their text", async () => {
+    await api("PATCH", "/api/skeptic/settings", { mode: "off" });
+    const chromium = await loadChromium("attach");
+    if (!chromium) return;
+    const dir = project("attach");
+    const first = await api("POST", "/api/turns", { cwd: dir, prompt: "[[say ready]]", permissionMode: "default", skeptic: "off" });
+    await idle(first.json.sessionId);
+    const browser = await launchChromium(chromium);
+    try {
+      for (const [width, height] of [[390, 844], [1440, 900]]) {
+        const page = await attachPage(browser, width, height, "/s/" + first.json.sessionId);
+        // + opens the menu, and "Choose file" there opens the picker for any file.
+        await page.locator("#attach").click();
+        const chooser = page.waitForEvent("filechooser");
+        await page.locator("#sheet .sheet-item", { hasText: "Choose file" }).click();
+        const picked = await chooser;
+        assert.equal(picked.isMultiple(), true);
+        await picked.setFiles(attachSrc("notes.md", "table.csv", "spec.pdf", "plan.docx", "bundle.zip", "tool.py"));
+        await page.waitForFunction(() => document.querySelectorAll("#thumbs .filechip:not(.busy)").length === 6);
+        const chips = await page.locator("#thumbs .filechip").evaluateAll((list) => list.map((c) => ({ name: c.querySelector(".filechip-name").textContent, meta: c.querySelector(".filechip-meta").textContent })));
+        assert.deepEqual(chips.map((c) => c.name), ["notes.md", "table.csv", "spec.pdf", "plan.docx", "bundle.zip", "tool.py"]);
+        assert.ok(chips.every((c) => /\d+ (B|KB)/.test(c.meta)), JSON.stringify(chips));
+        const overflow = await page.evaluate(() => ({ page: document.documentElement.scrollWidth - document.documentElement.clientWidth, composer: document.querySelector("#composer").scrollWidth - document.querySelector("#composer").clientWidth }));
+        assert.deepEqual(overflow, { page: 0, composer: 0 });
+        assert.deepEqual(await paintedOverlaps(page), [], "no overlaps at " + width);
+        if (width === 390) await page.screenshot({ path: path.join(SHOTS, "attach-390.png") });
+        // A chip comes off with its x, and nothing else moves.
+        await page.getByRole("button", { name: "Remove tool.py" }).click();
+        assert.equal(await page.locator("#thumbs .filechip").count(), 5);
+        await page.getByRole("button", { name: "Remove bundle.zip" }).click();
+        assert.equal(await page.locator("#thumbs .filechip").count(), 4);
+        await page.locator("#input").fill("[[say read them]] please use these");
+        await page.locator("#send").click();
+        await page.waitForSelector(".msg.user .msg-files");
+        await waitFor(() => fullPrompts(first.json.sessionId).length >= 2, 15000, "the second prompt");
+        await idle(first.json.sessionId);
+        await page.close();
+        if (width === 390) break;
+      }
+      const prompt = fullPrompts(first.json.sessionId).at(-1).text;
+      const folder = path.join(dir, ".grok-deck", "uploads");
+      // The agent has the files in its working folder, and the prompt names them and carries their text.
+      for (const name of ["notes.md", "table.csv", "spec.pdf", "plan.docx"]) {
+        assert.ok(fs.existsSync(path.join(folder, name)), name + " is in the working folder");
+        assert.deepEqual(fs.readFileSync(path.join(folder, name)), attachFiles[name]);
+        assert.ok(prompt.includes(path.join(folder, name)), "the prompt names " + name);
+      }
+      assert.ok(!fs.existsSync(path.join(folder, "tool.py")) && !fs.existsSync(path.join(folder, "bundle.zip")), "removed chips are not sent");
+      assert.ok(prompt.includes("please use these"));
+      assert.ok(prompt.includes("ZEBRA-4471"), "markdown inline");
+      assert.ok(prompt.includes("widget,12"), "csv inline");
+      assert.ok(prompt.includes("Hello PDF text from the spec"), "pdf through pdftotext");
+      assert.ok(prompt.includes("PELICAN-9"), "docx through the extractor");
+      assert.ok(fs.readFileSync(path.join(folder, "../.gitignore"), "utf8").trim() === "*");
+      assert.ok(prompt.length < 20000, "bounded: " + prompt.length);
+      attached = { id: first.json.sessionId, dir };
+    } finally {
+      await browser.close();
+    }
+  });
+
+  await check("attach: the sent message shows its files as embed cards, now and after a reload, without the machinery", async () => {
+    if (!attached) return;
+    const chromium = await loadChromium("attach embed");
+    if (!chromium) return;
+    const view = await session(attached.id);
+    const user = view.messages.filter((m) => m.role === "user").at(-1);
+    assert.deepEqual(user.files.map((f) => f.name), ["notes.md", "table.csv", "spec.pdf", "plan.docx"]);
+    assert.ok(!user.text.includes("deck-attachments") && !user.text.includes("ZEBRA"), "the block is not part of the message: " + user.text);
+    const browser = await launchChromium(chromium);
+    try {
+      for (const [width, height] of [[390, 844], [1440, 900]]) {
+        const page = await attachPage(browser, width, height, "/s/" + attached.id);
+        await page.waitForSelector(".msg.user .msg-files .embed-card");
+        const cards = await page.locator(".msg.user .msg-files .embed-card .embed-name").allTextContents();
+        assert.deepEqual(cards, ["notes.md", "table.csv", "spec.pdf", "plan.docx"]);
+        assert.equal(await page.locator(".msg.user .msg-files .embed-pdf iframe").count(), 1);
+        assert.equal(await page.locator(".msg.user .msg-files a.embed-file").count(), 1, "the docx is a download card");
+        const md = page.locator(".msg.user .msg-files .embed-doc", { has: page.locator(".embed-name", { hasText: "notes.md" }) });
+        await md.locator(".md-doc h1").waitFor();
+        assert.match(await md.locator(".md-doc").textContent(), /ZEBRA-4471/);
+        assert.equal(await page.locator(".msg.user .msg-text").last().textContent(), "[[say read them]] please use these");
+        assert.deepEqual(await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth), 0);
+        assert.deepEqual(await paintedOverlaps(page), [], "no overlaps at " + width);
+        await page.close();
+      }
+    } finally {
+      await browser.close();
+    }
+  });
+
+  await check("attach: a file over 25 MB is refused with a clear message, by the page and by the server", async () => {
+    const chromium = await loadChromium("attach cap");
+    if (!chromium) return;
+    const big = path.join(attachDir, "huge.bin");
+    fs.writeFileSync(big, Buffer.alloc(26 * 1024 * 1024, 1));
+    const browser = await launchChromium(chromium);
+    try {
+      const page = await attachPage(browser, 390, 844, "/new");
+      await page.locator("#files").setInputFiles([big, attachSrc("notes.md")[0]]);
+      await page.waitForFunction(() => document.querySelectorAll("#thumbs .filechip:not(.busy)").length === 1);
+      const notice = await page.locator("#notice").textContent();
+      assert.match(notice, /huge\.bin is 26 MB, over the 25 MB limit/);
+      assert.deepEqual(await page.locator("#thumbs .filechip-name").allTextContents(), ["notes.md"], "the small one still attaches");
+      await page.close();
+    } finally {
+      await browser.close();
+    }
+    const refused = await fetch(BASE + "/api/uploads?name=huge.bin", { method: "POST", headers: { Cookie: cookie, "Content-Type": "application/octet-stream" }, body: fs.readFileSync(big) });
+    assert.equal(refused.status, 413);
+    assert.match((await refused.json()).error, /huge\.bin is 26 MB, over the 25 MB limit/);
+    const ok = await fetch(BASE + "/api/uploads?name=ok.txt", { method: "POST", headers: { Cookie: cookie, "Content-Type": "application/octet-stream" }, body: "fine" });
+    assert.equal(ok.status, 200);
+    assert.equal((await ok.json()).kind, "code");
+    assert.equal((await fetch(BASE + "/api/uploads?name=x.txt", { method: "POST", body: "no login" })).status, 401);
+    const nine = await api("POST", "/api/turns", { cwd: attached.dir, prompt: "x", files: Array.from({ length: 9 }, () => ({ id: "a".repeat(64) + ".md", name: "a.md" })) });
+    assert.equal(nine.status, 400);
+    assert.match(nine.json.error, /up to 8 files/);
+    const gone = await api("POST", "/api/turns", { cwd: attached.dir, prompt: "x", files: [{ id: "b".repeat(64) + ".md", name: "gone.md" }] });
+    assert.equal(gone.status, 400);
+    assert.match(gone.json.error, /no longer available/);
+  });
+
+  await check("attach: paste and drop add files, photos keep the photo path, and a new chat starts with its files", async () => {
+    const chromium = await loadChromium("attach paste");
+    if (!chromium) return;
+    const png = path.join(attachDir, "pic.png");
+    fs.writeFileSync(png, widePng(30, 20));
+    const dir = project("attach-new");
+    const browser = await launchChromium(chromium);
+    try {
+      const page = await attachPage(browser, 1440, 900, "/new");
+      await page.locator("#sheet, #input").first().waitFor({ state: "attached" });
+      const send = (kind) => page.evaluate((how) => {
+        const dt = new DataTransfer();
+        dt.items.add(new File(["pasted words ZEBRA-PASTE"], how === "paste" ? "pasted.txt" : "dropped.json", { type: how === "paste" ? "text/plain" : "application/json" }));
+        if (how === "paste") document.dispatchEvent(new ClipboardEvent("paste", { clipboardData: dt, bubbles: true, cancelable: true }));
+        else {
+          const over = new DragEvent("dragover", { dataTransfer: dt, bubbles: true, cancelable: true });
+          document.dispatchEvent(over);
+          document.dispatchEvent(new DragEvent("drop", { dataTransfer: dt, bubbles: true, cancelable: true }));
+        }
+      }, kind);
+      await send("paste");
+      await send("drop");
+      await page.waitForFunction(() => document.querySelectorAll("#thumbs .filechip:not(.busy)").length === 2);
+      assert.deepEqual((await page.locator("#thumbs .filechip-name").allTextContents()).sort(), ["dropped.json", "pasted.txt"]);
+      // A photo goes down the photo path: a thumbnail, no file chip, no copy in the folder.
+      await page.locator("#files").setInputFiles(png);
+      await page.waitForSelector("#thumbs .thumb img");
+      assert.equal(await page.locator("#thumbs .filechip").count(), 2);
+      // A new session takes the files with its first message.
+      await page.locator("#dir, input[name=cwd], .dir-input").first().fill(dir).catch(() => {});
+      await page.close();
+    } finally {
+      await browser.close();
+    }
+    const up = await (await fetch(BASE + "/api/uploads?name=first.md", { method: "POST", headers: { Cookie: cookie, "Content-Type": "application/octet-stream" }, body: "# first ZEBRA-NEW" })).json();
+    const started = await api("POST", "/api/turns", { cwd: dir, prompt: "[[say hi]]", files: [{ id: up.id, name: up.name }], permissionMode: "default", skeptic: "off" });
+    assert.equal(started.status, 200, JSON.stringify(started.json));
+    await idle(started.json.sessionId);
+    assert.ok(fs.existsSync(path.join(dir, ".grok-deck", "uploads", "first.md")));
+    assert.ok(fullPrompts(started.json.sessionId).at(-1).text.includes("ZEBRA-NEW"));
+    // Files alone, with no words, are a message too.
+    const only = await api("POST", "/api/turns", { cwd: dir, files: [{ id: up.id, name: up.name }], permissionMode: "default", skeptic: "off" });
+    assert.equal(only.status, 200, JSON.stringify(only.json));
+    await idle(only.json.sessionId);
+    assert.match(fullPrompts(only.json.sessionId).at(-1).text, /^See the attached file\./);
+    assert.equal((await session(only.json.sessionId)).messages.find((m) => m.role === "user").text, "See the attached file.");
+  });
+
+  await check("links: a file anywhere under the home folder resolves (absolute, ~, relative, spaces, %-encoding), secrets never do, and one that appears later is found", async () => {
+    await api("PATCH", "/api/skeptic/settings", { mode: "off" });
+    // 13 Oct 2026: "[Backlog]($HOME/Projects/other-project/NOTES.md)" from a session in
+    // $HOME/Projects/my-project showed "File moved or deleted": a sibling project, outside the working folder.
+    const home = fs.mkdtempSync(path.join(os.homedir(), "gm-e2e-links-"));
+    try {
+      const cwd = path.join(home, "proj");
+      const notes = path.join(home, "notes");
+      const other = path.join(home, "other");
+      for (const d of [cwd, notes, other, path.join(cwd, "docs"), path.join(home, ".ssh")]) fs.mkdirSync(d, { recursive: true });
+      fs.writeFileSync(path.join(cwd, "PROGRESS.md"), "# Progress\n");
+      fs.writeFileSync(path.join(cwd, "fake-turns.json"), "[]");
+      fs.writeFileSync(path.join(notes, "Backlog.md"), "# Backlog\n\nThe backlog token is OWL-7731.\n");
+      fs.writeFileSync(path.join(notes, "tilde note.md"), "# Tilde\n");
+      fs.writeFileSync(path.join(cwd, "docs", "rel note.md"), "# Relative\n");
+      fs.writeFileSync(path.join(other, "up.md"), "# Up\n");
+      for (const secret of [path.join(notes, ".env"), path.join(notes, "server.pem"), path.join(notes, "id_ed25519.txt"), path.join(home, ".ssh", "note.md"), path.join(home, ".ssh", "config.txt")]) fs.writeFileSync(secret, "SECRET-DO-NOT-SHOW\n");
+      const rel = path.relative(os.homedir(), path.join(notes, "tilde note.md"));
+      const say = [
+        "[Backlog](" + path.join(notes, "Backlog.md") + ")",
+        "[encoded](" + path.join(notes, "Classic%20difficulty%20backlog.md") + ")",
+        "[tilde](~/" + rel + ")",
+        "[relative](docs/rel note.md)",
+        "[up](../other/up.md)",
+        "[dotenv](" + path.join(notes, ".env") + ")",
+        "[cert](" + path.join(notes, "server.pem") + ")",
+        "[key](" + path.join(notes, "id_ed25519.txt") + ")",
+        "[ssh](" + path.join(home, ".ssh", "note.md") + ")",
+        "[ssh2](~/" + path.relative(os.homedir(), path.join(home, ".ssh", "config.txt")) + ")",
+        "[elsewhere](/etc/hostname.txt)",
+        "[later](after.md)",
+      ].join("\n\n");
+      const created = await api("POST", "/api/turns", { cwd, prompt: "[[say " + say + "]]", permissionMode: "default", skeptic: "off" });
+      assert.equal(created.status, 200, JSON.stringify(created.json));
+      const id = created.json.sessionId;
+      await idle(id);
+      const text = (await session(id)).messages.find((m) => m.role === "assistant").text;
+      const stored = (label) => new RegExp("\\[" + label + "\\]\\(/api/media/[0-9a-f]{64}\\.md\\?n=[^)]+\\)").test(text);
+      for (const label of ["Backlog", "encoded", "tilde", "relative", "up"]) assert.ok(stored(label), label + " was copied into the store:\n" + text);
+      for (const label of ["dotenv", "cert", "key", "ssh", "ssh2", "elsewhere", "later"]) assert.ok(!stored(label) && !new RegExp("\\[" + label + "\\]\\(/api/media/").test(text), label + " was left as written");
+      assert.ok(!fs.readdirSync(path.join(tmp, "data", "media")).some((f) => fs.readFileSync(path.join(tmp, "data", "media", f)).includes("SECRET-DO-NOT-SHOW")), "no secret reached the store");
+      const chromium = await loadChromium("links");
+      if (!chromium) return;
+      const browser = await launchChromium(chromium);
+      try {
+        const page = await browser.newPage({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 1 });
+        await page.context().addCookies([{ name: "gm_session", value: cookie.split("=")[1], url: BASE, httpOnly: true, sameSite: "Strict" }]);
+        await page.goto(BASE + "/s/" + id, { waitUntil: "domcontentloaded" });
+        await page.waitForSelector(".msg.assistant .embed-doc");
+        const names = await page.locator(".msg.assistant .embed-doc .embed-name").allTextContents();
+        assert.deepEqual(names.sort(), ["Backlog.md", "Backlog.md", "rel note.md", "tilde note.md", "up.md"]);
+        assert.equal(await page.locator(".msg.assistant .md-missing").count(), 7, "the refused ones and the one not written yet show the card");
+        // The file the agent had not written yet appears: coming back to the page finds it, no reload.
+        fs.writeFileSync(path.join(cwd, "after.md"), "# After\n\nWritten late.\n");
+        await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+        await page.waitForFunction(() => [...document.querySelectorAll(".msg.assistant .embed-doc .embed-name")].some((n) => n.textContent === "after.md"));
+        assert.equal(await page.locator(".msg.assistant .md-missing").count(), 6);
+        assert.match(await page.locator(".embed-doc", { has: page.locator(".embed-name", { hasText: "after.md" }) }).textContent(), /after\.md/);
+        await page.close();
+      } finally {
+        await browser.close();
+      }
+      // A file written while the message is still open (before the next step) is found when the message closes.
+      const raced = await api("POST", "/api/turns", { cwd, prompt: "[[say See [late one](late.md)]][[sleep 400]][[write late.md written during the turn]]", permissionMode: "default", skeptic: "off" });
+      await idle(raced.json.sessionId);
+      const lateText = (await session(raced.json.sessionId)).messages.find((m) => m.role === "assistant").text;
+      assert.match(lateText, /\[late one\]\(\/api\/media\/[0-9a-f]{64}\.md\?n=late\.md\)/, "the reference made before the file existed is resolved: " + lateText);
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  // ask_user_question: the fake agent sends the request exactly as Grok 1.0.50 does (captured 13 Oct 2026) and then says
+  // what it was answered, so every test sees the answer in the shape Grok gets.
+  const colourQ = { question: "Which colour do you prefer?", multiSelect: null, options: [{ label: "Red", description: "Prefer red" }, { label: "Green", description: "Prefer green" }, { label: "Blue", description: "Prefer blue" }] };
+  const askTurn = async (name, questions, extra = {}) => {
+    await api("PATCH", "/api/skeptic/settings", { mode: "off" });
+    const dir = project(name);
+    const created = await api("POST", "/api/turns", { cwd: dir, prompt: "[[ask " + JSON.stringify({ questions, ...extra }) + "]]", permissionMode: "default", skeptic: "off" });
+    assert.equal(created.status, 200, JSON.stringify(created.json));
+    const id = created.json.sessionId;
+    await waitFor(async () => (await session(id)).messages.some((m) => m.role === "question" && m.status === "waiting"), 8000, "the question card");
+    return id;
+  };
+  const agentGot = async (id) => {
+    await idle(id);
+    const said = (await session(id)).messages.filter((m) => m.role === "assistant").map((m) => m.text).join("\n");
+    const m = /answer:(\{.*\})/.exec(said);
+    assert.ok(m, "the agent was answered: " + said);
+    return JSON.parse(m[1]);
+  };
+  const questionPage = async (browser, id, width = 390, height = 844, appearance = "dark") => {
+    const page = await browser.newPage({ viewport: { width, height }, deviceScaleFactor: 1 });
+    await page.context().addCookies([{ name: "gm_session", value: cookie.split("=")[1], url: BASE, httpOnly: true, sameSite: "Strict" }]);
+    await page.addInitScript((mode) => localStorage.setItem("gm-appearance", mode), appearance);
+    await page.goto(BASE + "/s/" + id, { waitUntil: "domcontentloaded" });
+    await page.waitForSelector(".qcard.asking");
+    return page;
+  };
+
+  await check("question: a card with a button per option; one tap answers, and the agent gets Grok's exact answer shape", async () => {
+    const id = await askTurn("ask-one", [colourQ]);
+    const chromium = await loadChromium("question");
+    if (!chromium) return;
+    const browser = await launchChromium(chromium);
+    try {
+      for (const [width, height] of [[390, 844], [1440, 900]]) {
+        const sid = width === 390 ? id : await askTurn("ask-one-wide", [colourQ]);
+        const page = await questionPage(browser, sid, width, height);
+        assert.equal(await page.locator(".qcard .q-head").textContent(), "Grok asks");
+        assert.equal(await page.locator(".qcard .q-text").textContent(), "Which colour do you prefer?");
+        assert.deepEqual(await page.locator(".qcard .q-opt .q-label").allTextContents(), ["Red", "Green", "Blue"]);
+        assert.deepEqual(await page.locator(".qcard .q-opt .q-desc").allTextContents(), ["Prefer red", "Prefer green", "Prefer blue"]);
+        assert.equal(await page.locator(".qcard .q-other").getAttribute("placeholder"), "Other");
+        assert.deepEqual(await paintedOverlaps(page), [], "no overlaps at " + width);
+        assert.deepEqual(await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth), 0);
+        await page.locator(".qcard .q-opt", { hasText: "Green" }).click();
+        await page.waitForSelector(".qcard:not(.asking)");
+        assert.equal(await page.locator(".qcard .q-head").textContent(), "You answered");
+        assert.equal(await page.locator(".qcard .q-answer").textContent(), "Green");
+        assert.equal(await page.locator(".qcard .q-opt").count(), 0);
+        assert.deepEqual(await agentGot(sid), { outcome: "accepted", answers: { "Which colour do you prefer?": "Green" } });
+        await page.close();
+      }
+    } finally {
+      await browser.close();
+    }
+  });
+
+  await check("question: two questions, multi-select and Other; Send waits until each is answered", async () => {
+    const questions = [
+      { question: "Which colours do you like?", multiSelect: true, options: [{ label: "Red", description: "Red" }, { label: "Green", description: "Green" }, { label: "Blue", description: "Blue" }] },
+      { question: "Which size?", multiSelect: null, options: [{ label: "Small", description: "Small" }, { label: "Large", description: "Large" }] },
+    ];
+    const id = await askTurn("ask-two", questions);
+    const chromium = await loadChromium("question");
+    if (!chromium) return;
+    const browser = await launchChromium(chromium);
+    try {
+      const page = await questionPage(browser, id);
+      const send = page.locator(".qcard .q-send");
+      assert.equal(await send.isDisabled(), true, "nothing answered yet");
+      const colours = page.locator(".qcard .q-block").nth(0);
+      await colours.locator(".q-opt", { hasText: "Red" }).click();
+      await colours.locator(".q-opt", { hasText: "Blue" }).click();
+      assert.deepEqual(await colours.locator(".q-opt").evaluateAll((l) => l.map((b) => b.getAttribute("aria-pressed"))), ["true", "false", "true"], "several can be on at once, and the picked ones look different");
+      assert.equal(await send.isDisabled(), true, "the second question is still open");
+      assert.equal(await page.locator(".qcard.asking").count(), 1, "a tap does not answer when there is more to say");
+      // Other: typing replaces the choice for a single-select question.
+      const size = page.locator(".qcard .q-block").nth(1);
+      await size.locator(".q-opt", { hasText: "Large" }).click();
+      await size.locator(".q-other").fill("my own size");
+      assert.deepEqual(await size.locator(".q-opt").evaluateAll((l) => l.map((b) => b.getAttribute("aria-pressed"))), ["false", "false"]);
+      assert.equal(await send.isDisabled(), false);
+      await page.screenshot({ path: path.join(SHOTS, "question-390.png") });
+      await send.click();
+      await page.waitForSelector(".qcard:not(.asking)");
+      assert.deepEqual(await page.locator(".qcard .q-answer").allTextContents(), ["Red, Blue", "my own size"]);
+      assert.deepEqual(await agentGot(id), { outcome: "accepted", answers: { "Which colours do you like?": ["Red", "Blue"], "Which size?": "my own size" } });
+      // The card outlives the turn: it is what the session shows afterwards, with what was answered.
+      const card = (await waitFor(async () => (await session(id)).messages.find((m) => m.role === "question" && m.answers), 5000, "the answered card"));
+      assert.equal(card.status, "answered");
+      assert.deepEqual(card.answers, [["Red", "Blue"], "my own size"]);
+      await page.close();
+    } finally {
+      await browser.close();
+    }
+  });
+
+  await check("question: Other with Enter, Skip, a subagent's question, a reload partway, and a second answer is refused", async () => {
+    const chromium = await loadChromium("question");
+    if (!chromium) return;
+    const browser = await launchChromium(chromium);
+    try {
+      // Other, answered with Enter on a single question.
+      const typed = await askTurn("ask-other", [colourQ]);
+      let page = await questionPage(browser, typed);
+      await page.locator(".qcard .q-other").fill("teal, actually");
+      await page.locator(".qcard .q-other").press("Enter");
+      await page.waitForSelector(".qcard:not(.asking)");
+      assert.deepEqual(await agentGot(typed), { outcome: "accepted", answers: { "Which colour do you prefer?": "teal, actually" } });
+      await page.close();
+      // Skip tells the agent the user declined.
+      const skipped = await askTurn("ask-skip", [colourQ]);
+      page = await questionPage(browser, skipped);
+      await page.locator(".qcard .q-skip").click();
+      await page.waitForSelector(".qcard:not(.asking)");
+      assert.equal(await page.locator(".qcard .q-head").textContent(), "You skipped this");
+      assert.deepEqual(await agentGot(skipped), { outcome: "cancelled" });
+      await page.close();
+      // A subagent asks: the same card, with its name, at the top level.
+      const sub = await askTurn("ask-sub", [colourQ], { child: "11111111-2222-3333-4444-555555555555" });
+      page = await questionPage(browser, sub);
+      assert.match(await page.locator(".qcard .q-head").textContent(), /Subagent asks/);
+      await page.close();
+      await api("POST", "/api/sessions/" + sub + "/cancel", {});
+      await idle(sub);
+      // Reload partway: the question is still there, answerable, and another device's answer wins once.
+      const partway = await askTurn("ask-reload", [colourQ]);
+      page = await questionPage(browser, partway);
+      await page.reload({ waitUntil: "domcontentloaded" });
+      await page.waitForSelector(".qcard.asking .q-opt");
+      const reqId = (await session(partway)).messages.find((m) => m.role === "question").reqId;
+      const first = await api("POST", "/api/sessions/" + partway + "/question", { reqId, answers: ["Blue"] });
+      assert.equal(first.status, 200, JSON.stringify(first.json));
+      const second = await api("POST", "/api/sessions/" + partway + "/question", { reqId, answers: ["Red"] });
+      assert.equal(second.status, 409);
+      await page.waitForSelector(".qcard:not(.asking)");
+      assert.equal(await page.locator(".qcard .q-answer").textContent(), "Blue", "the card follows an answer given elsewhere");
+      assert.deepEqual(await agentGot(partway), { outcome: "accepted", answers: { "Which colour do you prefer?": "Blue" } });
+      await page.close();
+    } finally {
+      await browser.close();
+    }
+  });
+
+  await check("question: bad answers are refused, Stop closes the question, and an unanswered one gives up", async () => {
+    const multi = { question: "Pick some", multiSelect: true, options: [{ label: "A", description: "A" }, { label: "B", description: "B" }] };
+    const id = await askTurn("ask-bad", [colourQ, multi]);
+    const reqId = (await session(id)).messages.find((m) => m.role === "question").reqId;
+    const post = (body) => api("POST", "/api/sessions/" + id + "/question", { reqId, ...body });
+    assert.equal((await post({ answers: ["Red"] })).status, 400, "every question needs an answer");
+    assert.equal((await post({ answers: ["", ["A"]] })).status, 400);
+    assert.equal((await post({ answers: [["Red", "Blue"], ["A"]] })).status, 400, "one answer for a single-select question");
+    assert.equal((await api("POST", "/api/sessions/" + id + "/question", { reqId: "nope", answers: [] })).status, 409);
+    assert.equal((await api("POST", "/api/sessions/" + id + "/permission", { reqId, decision: "once" })).status, 409, "a question is not an approval");
+    // Stop: the card closes as not answered and the agent hears that no answer is coming.
+    await api("POST", "/api/sessions/" + id + "/cancel", {});
+    await idle(id);
+    const view = await session(id);
+    assert.equal(view.messages.find((m) => m.role === "question").status, "cancelled");
+    // Nobody answers: it gives up after the timeout and the agent carries on.
+    const quiet = await askTurn("ask-quiet", [colourQ]);
+    assert.deepEqual(await agentGot(quiet), { outcome: "cancelled" });
+    assert.equal((await session(quiet)).messages.find((m) => m.role === "question").status, "cancelled");
   });
 
   await check("one answer per turn: earlier assistant messages fold into the steps by position, live ones stay until superseded", async () => {

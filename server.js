@@ -23,11 +23,11 @@ import { cancelQueued, enqueue, hasLoopItem, loadQueues, queueFor, sendNow } fro
 import { createLoop, deleteLoop, isLoopTurn, loopsFor, parseLoopCommand, startLoops, stopLoopTimers, updateLoop, flushLoops } from "./lib/loops.js";
 import { flushRunning, setShuttingDown as stopRecovery, startRecovery } from "./lib/recover.js";
 import { cleanThemeId, listThemes } from "./lib/theme.js";
-import { cancelAll as cancelSkeptics, cancelReview, dismiss as dismissReview, getSettings as skepticSettings, reviewCount, loadSettings as loadSkepticSettings, reviewFor, usageFor as skepticUsage, sendIssues, setSettings as setSkepticSettings, startReview, startSkeptic, userSent as skepticUserSent } from "./lib/skeptic.js";
+import { cancelAll as cancelSkeptics, cancelReview, dismiss as dismissReview, getSettings as skepticSettings, reviewCount, loadSettings as loadSkepticSettings, reviewFor, usageFor as skepticUsage, sendIssues, setSettings as setSkepticSettings, startReview, startSkeptic, sweepStrayReviewSessions, userSent as skepticUserSent } from "./lib/skeptic.js";
 import { LONG_RULES, beginLongRun, flushRuns, isLongRun, loadRuns, longRunFor, setShuttingDown, startSupervisor, stopLongRun } from "./lib/longrun.js";
 import { bindAddresses, clientIp, hostAllowedName, isAllowedIp, lanAddresses, lanHostAllowed } from "./lib/net.js";
 import { getDataDir, getPort, publicDir } from "./lib/paths.js";
-import { activeMap, isBusy, answerPermission, lastEventId, cancelSubagent, cancelTurn, getTurn, startTurn, stopAll, turnEvents, viewTurn, forgetTurn, answerPlan, watchPayload } from "./lib/runner.js";
+import { activeMap, isBusy, answerPermission, lastEventId, cancelSubagent, cancelTurn, getTurn, startTurn, stopAll, turnEvents, viewTurn, forgetTurn, answerPlan, answerQuestion, watchPayload } from "./lib/runner.js";
 import {
   applyManualTitle,
   cleanEffort,
@@ -38,6 +38,7 @@ import {
   listDirs,
   listSessions,
   loadTranscript,
+  getMeta,
   getAppearance,
   getThemePref,
   migrateMeta,
@@ -50,7 +51,10 @@ import {
   resolveInside,
   trashSession,
 } from "./lib/sessions.js";
-import { internMessages, mediaType, statMedia } from "./lib/media.js";
+import { applyQuestions } from "./lib/history.js";
+import { internMessages, internTarget, mediaType, statMedia } from "./lib/media.js";
+import { MAX_UPLOAD, saveUpload, sizeLabel } from "./lib/uploads.js";
+import { PSTACK_CREDIT, pstackPlugin, skillsFor } from "./lib/skills.js";
 import { getTheme, neutralThemeColor, neutralVars, themeCss } from "./lib/theme.js";
 
 const PORT = getPort();
@@ -181,6 +185,7 @@ async function transcriptFor(id) {
     return { session: record, ...view, queue: queueFor(id), loops: loopsFor(id), longRun: longRunFor(id), skeptic: await reviewFor(id) };
   }
   const disk = await loadTranscript(id);
+  disk.messages = applyQuestions(disk.messages, (await getMeta()).sessions?.[id]?.asked);
   const found = await findSession(id);
   await internMessages(disk.messages, id, { cwd: found?.cwd, dir: found?.dir });
   if (turn && turn.done) {
@@ -462,6 +467,13 @@ async function handleApi(req, res, url) {
     return;
   }
 
+  // The skills Grok advertised (names and one-line descriptions) for the composer's / picker.
+  if (req.method === "GET" && pathname === "/api/skills") {
+    const id = url.searchParams.get("session") || "";
+    sendJson(res, 200, { skills: await skillsFor(isUuid(id) ? id : ""), credit: PSTACK_CREDIT });
+    return;
+  }
+
   if (req.method === "GET" && pathname === "/api/account") {
     sendJson(res, 200, await accountUsage());
     return;
@@ -489,6 +501,27 @@ async function handleApi(req, res, url) {
     forgetTurn(id);
     console.log("session deleted", id, removed ? "(moved to trash)" : "(meta only)");
     sendJson(res, 200, { ok: true });
+    return;
+  }
+
+  // A reference that was not a file when its message arrived, looked at again (the page asks when it draws the
+  // "moved or deleted" card, and when it comes back to the tab). Copies the file into the store if it is there now.
+  const recheckMatch = pathname.match(/^\/api\/sessions\/([0-9a-f-]{36})\/media$/i);
+  if (recheckMatch && req.method === "POST") {
+    if (!wantsJson(req)) {
+      sendJson(res, 415, { error: "Use JSON" });
+      return;
+    }
+    const body = await readBody(req);
+    const found = await findSession(recheckMatch[1]);
+    const target = String(body.target || "").slice(0, 1000);
+    if (!found || !target) {
+      sendJson(res, 404, { error: "Not found" });
+      return;
+    }
+    const turn = getTurn(recheckMatch[1]);
+    const url = await internTarget(target, { cwd: turn?.cwd || found.cwd, dir: found.dir });
+    sendJson(res, 200, { url });
     return;
   }
 
@@ -799,6 +832,18 @@ async function handleApi(req, res, url) {
     return;
   }
 
+  const questionMatch = pathname.match(/^\/api\/sessions\/([0-9a-f-]{36})\/question$/i);
+  if (questionMatch && req.method === "POST") {
+    if (!wantsJson(req)) {
+      sendJson(res, 415, { error: "Use JSON" });
+      return;
+    }
+    const body = await readBody(req);
+    const result = await answerQuestion(questionMatch[1], String(body.reqId || ""), { cancel: body.cancel === true, answers: body.answers });
+    sendJson(res, result.ok ? 200 : result.status || 400, result.ok ? { ok: true } : { error: result.error });
+    return;
+  }
+
   const permMatch = pathname.match(/^\/api\/sessions\/([0-9a-f-]{36})\/permission$/i);
   if (permMatch && req.method === "POST") {
     if (!wantsJson(req)) {
@@ -820,6 +865,35 @@ async function handleApi(req, res, url) {
     return;
   }
 
+  // An attachment: the raw file as the body, its name in ?name=. It goes into the media store; sending the message
+  // copies it into the working folder. Over the cap it is read and thrown away, so the answer can be sent.
+  if (req.method === "POST" && pathname === "/api/uploads") {
+    const name = String(url.searchParams.get("name") || "file");
+    const declared = Number(req.headers["content-length"]) || 0;
+    if (declared > MAX_UPLOAD) {
+      req.resume();
+      sendJson(res, 413, { error: name.split(/[\\/]/).pop().slice(-120) + " is " + sizeLabel(declared) + ", over the " + sizeLabel(MAX_UPLOAD) + " limit." });
+      return;
+    }
+    const chunks = [];
+    let size = 0;
+    for await (const chunk of req) {
+      size += chunk.length;
+      if (size > MAX_UPLOAD) {
+        req.resume();
+        sendJson(res, 413, { error: name.split(/[\\/]/).pop().slice(-120) + " is over the " + sizeLabel(MAX_UPLOAD) + " limit." });
+        return;
+      }
+      chunks.push(chunk);
+    }
+    try {
+      sendJson(res, 200, await saveUpload(Buffer.concat(chunks), name));
+    } catch (error) {
+      sendJson(res, error.status || 500, { error: error.message });
+    }
+    return;
+  }
+
   if (req.method === "POST" && pathname === "/api/turns") {
     if (!wantsJson(req)) {
       sendJson(res, 415, { error: "Use JSON" });
@@ -838,6 +912,7 @@ async function handleApi(req, res, url) {
       cwd: body.cwd,
       prompt: body.prompt,
       images: body.images,
+      files: body.files,
       model: body.model,
       effort: body.effort,
       permissionMode: body.permissionMode,
@@ -1075,6 +1150,8 @@ async function main() {
   await migrateMeta();
   await loadRuns();
   await loadQueues();
+  const skillDir = await pstackPlugin();
+  if (skillDir) console.log("pstack skills", skillDir);
   await startLoops({
     enqueue,
     hasLoopItem,
@@ -1086,6 +1163,7 @@ async function main() {
   await startRecovery({ isLongRun, hasQueued: (id) => queueFor(id).length > 0 });
   await loadSkepticSettings();
   startSkeptic();
+  sweepStrayReviewSessions().catch((error) => console.error("stray review sweep failed", error?.message || "error"));
   startSupervisor(async (run, head, body) => {
     const name = await sessionTitle(run.id, "");
     sendPush({ title: head + " · " + name, body: String(body || "").slice(0, 160), url: "/s/" + run.id, tag: "long-" + run.id, urgent: head !== "Long run done" }).catch(() => {});
@@ -1135,9 +1213,9 @@ async function sessionTitle(id, fallback) {
   }
 }
 
-turnEvents.on("permission", async ({ id, title, subName, detail }) => {
+turnEvents.on("permission", async ({ id, title, kind, subName, detail }) => {
   const name = await sessionTitle(id, title);
-  sendPush({ title: "Approval needed · " + name, body: (subName ? subName + ": " : "") + String(detail || "Grok is waiting for you").slice(0, 160), url: "/s/" + id, tag: "perm-" + id, urgent: true }).catch(() => {});
+  sendPush({ title: (kind === "question" ? "Question · " : "Approval needed · ") + name, body: (subName ? subName + ": " : "") + String(detail || "Grok is waiting for you").slice(0, 160), url: "/s/" + id, tag: "perm-" + id, urgent: true }).catch(() => {});
 });
 
 turnEvents.on("finished", async ({ id, stopReason, title, error }) => {

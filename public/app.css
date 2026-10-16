@@ -2614,6 +2614,17 @@ button.row {
   text-align: left;
 }
 #sheet .sheet-item .sheet-label { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+#sheet .sheet-item { flex: none; }
+#sheet .sheet-item:has(.sheet-detail) { padding-block: var(--space-2); }
+#sheet .sheet-item .sheet-detail {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  font-size: var(--text-caption);
+  font-weight: var(--weight-regular);
+  color: var(--chat-fg-dim);
+}
 #sheet .sheet-item .sheet-check { margin-left: auto; color: var(--chat-fg); }
 #sheet .sheet-item:hover,
 #sheet .sheet-item:focus-visible { background: color-mix(in srgb, var(--chat-fg) 8%, transparent); }
@@ -3179,3 +3190,88 @@ body[data-view="chat"] .steps-body > .msg.bubble.earlier-reply {
 .docview-body:has(.docview-frame) { padding: 0; }
 .bubble.assistant a.embed-card, a.embed-card, a.embed-card:visited { color: var(--chat-fg); }
 .md-doc ul, .md-doc ol { padding-left: var(--space-6); margin: var(--space-2) 0; }
+
+/* Files attached to the message being written: chips in the composer, each removable. They stay in flow, in a row that scrolls. */
+.filechip {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: var(--space-2);
+  max-width: 260px;
+  min-width: 0;
+  min-height: 44px;
+  padding: 0 var(--space-1) 0 var(--space-3);
+  border: 1px solid var(--chat-line);
+  border-radius: var(--radius-pill);
+  background: var(--chat-card);
+  color: var(--chat-fg);
+}
+.filechip-icon { display: inline-flex; flex: none; color: var(--chat-fg-dim); }
+.filechip-icon svg { width: 18px; height: 18px; display: block; }
+.filechip.busy .filechip-icon svg { animation: gm-spin 0.9s linear infinite; }
+.filechip-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--text-label); font-weight: var(--weight-strong); }
+.filechip-meta { flex: none; font-size: var(--text-caption); font-weight: var(--weight-regular); color: var(--chat-fg-dim); }
+.filechip-x { flex: none; width: 36px; min-width: 36px; height: 36px; min-height: 36px; }
+@media (prefers-reduced-motion: reduce) { .filechip.busy .filechip-icon svg { animation: none; } }
+
+/* Files a sent message carried, drawn as the cards a linked file gets. */
+.msg-files { display: flex; flex-direction: column; gap: var(--space-2); min-width: 0; white-space: normal; }
+.msg-files .embed-card { margin: 0; }
+
+/* A question from the agent (ask_user_question): one card, a button per option, a text field for "Other". Always in flow. */
+.qcard {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  min-width: 0;
+  margin: var(--space-3) var(--space-4);
+  padding: var(--space-4);
+  border: 1px solid var(--chat-line);
+  border-radius: var(--radius-card);
+  background: var(--chat-card);
+  color: var(--chat-fg);
+}
+.qcard.asking { border-color: var(--chat-fg); }
+.q-head { font-size: var(--text-caption); font-weight: var(--weight-strong); color: var(--chat-fg-dim); }
+.q-block { display: flex; flex-direction: column; gap: var(--space-2); min-width: 0; }
+.q-text { font-size: var(--text-body); font-weight: var(--weight-strong); overflow-wrap: anywhere; }
+.q-answer { font-size: var(--text-body); font-weight: var(--weight-regular); color: var(--chat-fg); overflow-wrap: anywhere; }
+.q-opts { display: flex; flex-direction: column; gap: var(--space-2); min-width: 0; }
+.q-opt {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  width: 100%;
+  min-width: 0;
+  min-height: 48px;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--chat-line);
+  border-radius: var(--radius-tile);
+  background: var(--chat-code);
+  color: var(--chat-fg);
+  text-align: left;
+  font-size: var(--text-body);
+  font-weight: var(--weight-regular);
+}
+.q-opt[aria-pressed="true"] { border-color: var(--chat-fg); background: var(--chat-card); }
+.q-mark { display: inline-flex; flex: none; width: 18px; height: 18px; color: transparent; }
+.q-mark svg { width: 18px; height: 18px; display: block; }
+.q-opt[aria-pressed="true"] .q-mark { color: var(--chat-fg); }
+.q-words { display: flex; flex-direction: column; min-width: 0; }
+.q-label { font-size: var(--text-body); font-weight: var(--weight-regular); overflow-wrap: anywhere; }
+.q-desc { font-size: var(--text-caption); font-weight: var(--weight-regular); color: var(--chat-fg-dim); overflow-wrap: anywhere; }
+.q-other {
+  width: 100%;
+  min-height: 48px;
+  padding: 0 var(--space-3);
+  border: 1px solid var(--chat-line);
+  border-radius: var(--radius-tile);
+  background: var(--chat-code);
+  color: var(--chat-fg);
+  font-size: var(--text-body);
+  font-weight: var(--weight-regular);
+}
+.q-other::placeholder { color: var(--chat-fg-dim); font-size: var(--text-body); font-weight: var(--weight-regular); }
+.q-actions { display: flex; gap: var(--space-2); }
+.q-actions button { flex: 1; min-height: 44px; }
+.q-actions button:disabled { opacity: 0.5; }

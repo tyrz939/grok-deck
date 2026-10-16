@@ -199,13 +199,15 @@ function build(ui, holder) {
 // Fills every placeholder under root. A card already built for a source is reused, so a message that is drawn
 // again while it streams does not reload its players.
 export function hydrateEmbeds(root, cache, ui) {
+  const placed = new Set();
   for (const holder of root.querySelectorAll(".embed[data-src]")) {
     const key = holder.dataset.src;
     let card = cache.get(key);
     if (!card) {
       card = build(ui, holder);
       cache.set(key, card);
-    }
+    } else if (placed.has(card)) card = build(ui, holder); // the same file linked twice in one message: a card each
+    placed.add(card);
     holder.replaceWith(card);
   }
 }

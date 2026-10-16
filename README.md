@@ -78,6 +78,15 @@ On iPhone: open the tailnet HTTPS URL in Safari, log in, Share, Add to Home Scre
 - Each run shows in the chat as **Loop run 3 of 10 · every 30m**. Push only on a failed run or DONE, not on every run.
 - + menu → Loops: next run time, runs so far, pause, resume, delete.
 
+## Skills (pstack)
+
+Every session has the full [pstack](https://github.com/cursor/plugins/tree/main/pstack) skill set by Lauren Tan ([poteto](https://github.com/poteto)), MIT licensed, vendored as the submodule `vendor/cursor-plugins` (set `PSTACK_DIR` to use another checkout). Thanks to poteto for writing it.
+
+- Loading is Grok's own: the server passes `--plugin-dir` to `grok agent stdio`, Grok lists each skill's name and one-line description in the model's context, and the model reads a full SKILL.md only when a task calls for it. Typing `/name` runs it.
+- pstack marks every skill `disable-model-invocation: true` (in Cursor, poteto-mode is the router you turn on). Grok honours that flag, so the model would never see them. `lib/skills.js` builds a mirror in `data/plugins/pstack-<hash>/`: each SKILL.md copied with that one line removed, every other file a symlink to the vendored copy. The vendored files are never edited. A changed pstack gets a new folder.
+- A short rule tells Grok pstack's own router reminder (apply /poteto-mode for a new task that needs rigor) and how to read Cursor-only steps. Ultra loads the same mirror plus `ultra-plugin`.
+- In the composer, `/` at the start of the field (or + > Skills) lists every skill Grok advertised (`available_commands_update`, built-in commands left out), pstack first with its credit. A pick fills `/name `, which goes to Grok as typed.
+
 ## Limits
 
 - Approvals are always answered by this app (Grok never runs with --always-approve), so switching Always-approve, Auto approve or Ask takes effect immediately, even mid-turn.
@@ -98,3 +107,7 @@ On iPhone: open the tailnet HTTPS URL in Safari, log in, Share, Add to Home Scre
 
 - `npm test`: unit checks for the pure helpers.
 - `npm run test:e2e`: starts a second server on port 8799 (`E2E_PORT` to change) with a temporary data folder and a fake Grok (`test/fake-grok.mjs`), then checks process reuse, the start race, SSE ids, wake turns, the origin/host guard, approvals, the long-run DONE gate, no-progress pause, watchdog, queue persistence and restart recovery. It never touches `data/` or the live service.
+
+## License
+
+MIT, see [LICENSE](LICENSE). Copyright (c) 2026 John Keen. The vendored pstack skills (`vendor/cursor-plugins/pstack`) are by Lauren Tan ([poteto](https://github.com/poteto)) under their own MIT license, kept in `vendor/cursor-plugins/pstack/LICENSE`.

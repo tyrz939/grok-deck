@@ -201,6 +201,23 @@ export function applyEvent(state, ev) {
   } else if (type === "plan_ready") {
     state.messages.push({ id: "plan:" + ev.reqId, role: "planreview", reqId: ev.reqId, plan: String(ev.plan || ""), status: "waiting" });
     state.waiting = (state.waiting || 0) + 1;
+  } else if (type === "question") {
+    closeOpen(state);
+    // The tool call that raised it is the card now: its step goes, and later updates to it are not drawn.
+    if (ev.toolCallId) {
+      (state.askTools = state.askTools || new Set()).add(ev.toolCallId);
+      state.messages = state.messages.filter((m) => !(m.role === "tool" && m.tool && m.tool.id === ev.toolCallId));
+    }
+    state.messages.push({ id: "question:" + ev.reqId, role: "question", reqId: ev.reqId, questions: ev.questions || [], from: ev.from || "", status: "waiting" });
+    state.waiting = (state.waiting || 0) + 1;
+  } else if (type === "question_resolved") {
+    const card = state.messages.find((m) => m.role === "question" && m.reqId === ev.reqId);
+    if (card && card.status === "waiting") {
+      card.status = ev.outcome === "accepted" ? "answered" : "cancelled";
+      card.answers = ev.answers;
+      card.by = ev.by || "";
+      state.waiting = Math.max(0, (state.waiting || 0) - 1);
+    }
   } else if (type === "plan_resolved") {
     const card = state.messages.find((m) => m.role === "planreview" && m.reqId === ev.reqId);
     if (card && card.status === "waiting") {
@@ -228,7 +245,9 @@ export function applyEvent(state, ev) {
     state.messages = state.messages || [];
     state.messages.push({ id: "note:" + state.messages.length + ":" + Date.now(), role: "note", text: String(ev.data || "") });
   }
-  else if (type === "tool_call" || type === "tool_call_update") {
+  else if ((type === "tool_call" || type === "tool_call_update") && state.askTools?.has(ev.toolCallId)) {
+    // The question card stands for this tool call.
+  } else if (type === "tool_call" || type === "tool_call_update") {
     const message = ensureTool(state, ev);
     const tool = message.tool;
     if (ev.status) tool.status = ev.status;
@@ -314,6 +333,12 @@ export function applyEvent(state, ev) {
   } else if (type === "end") {
     closeOpen(state);
     state.ended = true;
+    for (const card of state.messages) {
+      if (card.role === "question" && card.status === "waiting") {
+        card.status = "cancelled";
+        state.waiting = Math.max(0, (state.waiting || 0) - 1);
+      }
+    }
     state.stopReason = ev.stopReason || "";
     for (const message of state.messages) {
       if (message.role === "subagent" && message.sub.status === "running") {

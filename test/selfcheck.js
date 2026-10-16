@@ -14,10 +14,12 @@ import { applyReasoning, longRunActive, modeChoice, reasoningChoice, reasoningCh
 import { findRefs, parseMedia, renderMarkdown, rewriteRefs } from "../public/markdown.js";
 import { accountBody, createBillingCache, parseBilling, planUsageLabel } from "../lib/billing.js";
 import { lastMessageSnippet } from "../lib/sessions.js";
+import { buildSkillPlugin, frontmatterField, skillsFromCommands } from "../lib/skills.js";
+import fsp from "node:fs/promises";
 import { hasDone, intervalLabel, parseInterval, parseLoopCommand, runLabel, validateLoop } from "../lib/loops.js";
 
 test("allows only loopback and Tailscale", () => {
-  for (const ip of ["127.0.0.1", "127.0.0.2", "::1", "::ffff:127.0.0.1", "100.64.0.1", "100.100.1.2", "100.127.255.255"]) {
+  for (const ip of ["127.0.0.1", "127.0.0.2", "::1", "::ffff:127.0.0.1", "100.64.0.1", "100.82.195.43", "100.127.255.255"]) {
     assert.equal(isAllowedIp(ip), true, ip);
   }
   for (const ip of ["8.8.8.8", "10.1.2.3", "192.168.1.50", "172.16.0.1", "172.31.255.255", "1.1.1.1", "100.63.1.1", "100.128.0.1", "0.0.0.0", "", "not-an-ip"]) {
@@ -924,4 +926,261 @@ test("stored files render by type, and documents keep their own text out of the 
   assert.match(renderMarkdown("[x](/gone/a.zip)"), /File moved or deleted/);
   assert.equal(renderMarkdown("[x](/gone/a.zip)", { embeds: false }), "<p>x</p>");
   assert.equal(parseMedia("/api/media/" + h + ".md?n=n.md").label, "n.md");
+});
+
+// A zip with stored entries, enough to stand in for a .docx or .pptx.
+function makeZip(files) {
+  const parts = [];
+  const central = [];
+  let offset = 0;
+  for (const [name, content] of Object.entries(files)) {
+    const data = Buffer.from(content);
+    const nameBuf = Buffer.from(name);
+    const local = Buffer.alloc(30);
+    local.writeUInt32LE(0x04034b50, 0);
+    local.writeUInt16LE(20, 4);
+    local.writeUInt32LE(data.length, 18);
+    local.writeUInt32LE(data.length, 22);
+    local.writeUInt16LE(nameBuf.length, 26);
+    parts.push(local, nameBuf, data);
+    const entry = Buffer.alloc(46);
+    entry.writeUInt32LE(0x02014b50, 0);
+    entry.writeUInt16LE(20, 4);
+    entry.writeUInt16LE(20, 6);
+    entry.writeUInt32LE(data.length, 20);
+    entry.writeUInt32LE(data.length, 24);
+    entry.writeUInt16LE(nameBuf.length, 28);
+    entry.writeUInt32LE(offset, 42);
+    central.push(entry, nameBuf);
+    offset += 30 + nameBuf.length + data.length;
+  }
+  const dir = Buffer.concat(central);
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0);
+  end.writeUInt16LE(Object.keys(files).length, 8);
+  end.writeUInt16LE(Object.keys(files).length, 10);
+  end.writeUInt32LE(dir.length, 12);
+  end.writeUInt32LE(offset, 16);
+  return Buffer.concat([...parts, dir, end]);
+}
+
+test("attachments: files are stored, copied into the working folder, read into the prompt, and read back from history", async () => {
+  const fs = await import("node:fs/promises");
+  const os = await import("node:os");
+  const data = await fs.mkdtemp(path.join(os.tmpdir(), "gm-up-data-"));
+  const work = await fs.mkdtemp(path.join(os.tmpdir(), "gm-up-work-"));
+  process.env.DATA_DIR = data;
+  const up = await import("../lib/uploads.js?" + Date.now());
+  assert.equal(up.cleanFileName("../../etc/pass wd?.md"), "pass wd_.md");
+  assert.equal(up.cleanFileName(".hidden"), "hidden");
+  const docx = makeZip({ "word/document.xml": "<w:document><w:body><w:p><w:r><w:t>Quarterly &amp; plan</w:t></w:r></w:p><w:p><w:r><w:t>Second line</w:t></w:r><w:tab/><w:r><w:t>after tab</w:t></w:r></w:p></w:body></w:document>" });
+  const pptx = makeZip({ "ppt/slides/slide2.xml": "<p><a:p><a:t>Two</a:t></a:p></p>", "ppt/slides/slide1.xml": "<p><a:p><a:t>One</a:t></a:p></p>" });
+  const uploads = [
+    await up.saveUpload(Buffer.from("# Notes\n\nhello from markdown"), "notes.md"),
+    await up.saveUpload(Buffer.from("a,b\n1,2\n"), "table.csv"),
+    await up.saveUpload(docx, "plan.docx"),
+    await up.saveUpload(pptx, "deck.pptx"),
+    await up.saveUpload(Buffer.alloc(3000, 1), "bundle.zip"),
+    await up.saveUpload(Buffer.from("x".repeat(30000)), "big.txt"),
+  ];
+  assert.deepEqual(uploads.map((u) => u.kind), ["markdown", "code", "file", "file", "file", "code"]);
+  await assert.rejects(up.saveUpload(Buffer.alloc(up.MAX_UPLOAD + 1), "huge.bin"), /over the 25 MB limit/);
+  await assert.rejects(up.saveUpload(Buffer.alloc(0), "empty.txt"), /is empty/);
+  const { files, block } = await up.attachFiles(uploads.map((u) => ({ id: u.id, name: u.name })), work);
+  assert.equal(files.length, 6);
+  assert.equal(await fs.readFile(path.join(work, ".grok-deck/uploads/notes.md"), "utf8"), "# Notes\n\nhello from markdown");
+  assert.equal(await fs.readFile(path.join(work, ".grok-deck/.gitignore"), "utf8"), "*\n");
+  assert.ok(block.includes(path.join(work, ".grok-deck/uploads/notes.md")), "the prompt names the copy");
+  assert.match(block, /hello from markdown/);
+  assert.match(block, /a,b\n1,2/);
+  assert.match(block, /Quarterly & plan\nSecond line\tafter tab/);
+  assert.match(block, /Slide 1:\nOne\n\nSlide 2:\nTwo/);
+  assert.ok(!/bundle\.zip\)[^]*Text of bundle/.test(block), "a zip carries its path and no text");
+  assert.match(block, /Text of big\.txt \(the first part; read the file for the rest\)/);
+  assert.ok(block.length < 70000, "the text is bounded: " + block.length);
+  // The same name with other content does not overwrite the first.
+  const other = await up.saveUpload(Buffer.from("different"), "notes.md");
+  const again = await up.attachFiles([{ id: other.id, name: "notes.md" }], work);
+  assert.notEqual(path.basename(again.files[0].name), "");
+  assert.equal(await fs.readFile(path.join(work, ".grok-deck/uploads/notes.md"), "utf8"), "# Notes\n\nhello from markdown");
+  assert.equal((await fs.readdir(path.join(work, ".grok-deck/uploads"))).filter((n) => n.startsWith("notes")).length, 2);
+  await assert.rejects(up.attachFiles([{ id: "0".repeat(64) + ".md", name: "gone.md" }], work), /no longer available/);
+  assert.throws(() => up.cleanFileRefs([{ id: "../../x", name: "a" }]), /Unknown file/);
+  assert.throws(() => up.cleanFileRefs(Array.from({ length: 9 }, () => ({ id: "a".repeat(64) + ".md", name: "a.md" }))), /up to 8 files/);
+  // History hands the files back and hides the block.
+  const back = up.extractAttachments("Please read these\n\n" + block);
+  assert.equal(back.text, "Please read these");
+  assert.deepEqual(back.files.map((f) => f.name), ["notes.md", "table.csv", "plan.docx", "deck.pptx", "bundle.zip", "big.txt"]);
+  assert.deepEqual(up.extractAttachments("no block here"), { files: [], text: "no block here" });
+  const messages = parseUpdates(JSON.stringify({ sessionUpdate: "user_message_chunk", content: { type: "text", text: "Look\n\n" + block } }) + "\n");
+  assert.equal(messages[0].text, "Look");
+  assert.equal(messages[0].files.length, 6);
+});
+
+test("media store: files under the home folder are read, secrets and Grok Deck's own data never are", async () => {
+  const fs = await import("node:fs/promises");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const home = await fs.mkdtemp(path.join(os.homedir(), "gm-sc-"));
+  try {
+    const cwd = path.join(home, "proj");
+    const data = path.join(home, "deckdata");
+    for (const d of [cwd, data, path.join(home, "notes"), path.join(home, ".ssh"), path.join(home, ".claude", "plans"), path.join(home, ".claude"), path.join(cwd, ".grok-deck", "uploads"), path.join(cwd, ".git")]) await fs.mkdir(d, { recursive: true });
+    process.env.DATA_DIR = data;
+    const media = await import("../lib/media.js?" + Date.now());
+    const put = (p, t = "text\n") => fs.writeFile(p, t);
+    await put(path.join(home, "notes", "Classic difficulty backlog.md"));
+    await put(path.join(cwd, ".grok-deck", "uploads", "up.md"));
+    await put(path.join(home, ".claude", "plans", "plan.md"));
+    await put(path.join(home, ".claude", ".credentials.json"));
+    await put(path.join(home, ".claude", "settings.md"));
+    await put(path.join(home, ".ssh", "a.md"));
+    await put(path.join(cwd, ".git", "config.txt"));
+    await put(path.join(data, "auth.json"));
+    await put(path.join(data, "notes.md"));
+    await put(path.join(home, "notes", "key.pem"));
+    await put(path.join(home, "notes", ".env"));
+    await put(path.join(home, "notes", "secrets.json"));
+    const session = { cwd, dir: cwd };
+    const ok = async (t) => (await media.internTarget(t, session)).startsWith("/api/media/");
+    assert.ok(await ok(path.join(home, "notes", "Classic difficulty backlog.md")), "a sibling folder under home");
+    assert.ok(await ok(path.join(home, "notes", "Classic%20difficulty%20backlog.md")), "percent-encoded");
+    assert.ok(await ok("~/" + path.relative(os.homedir(), path.join(home, "notes", "Classic difficulty backlog.md"))), "~ expands");
+    assert.ok(await ok("../notes/Classic difficulty backlog.md"), "relative to the working folder, up and over");
+    assert.ok(await ok(".grok-deck/uploads/up.md"), "an uploaded copy");
+    assert.ok(await ok(path.join(home, ".claude", "plans", "plan.md")), "plans are shown");
+    for (const no of [[".claude", ".credentials.json"], [".claude", "settings.md"], [".ssh", "a.md"], ["proj", ".git", "config.txt"], ["deckdata", "auth.json"], ["deckdata", "notes.md"], ["notes", "key.pem"], ["notes", ".env"], ["notes", "secrets.json"]]) {
+      assert.equal(await media.internTarget(path.join(home, ...no), session), "", "refused: " + no.join("/"));
+    }
+    assert.equal(await media.internTarget("/etc/hostname.txt", session), "", "outside home and the working folder");
+    assert.equal(await media.internTarget(path.join(home, "notes", "nope.md"), session), "", "not there");
+  } finally {
+    await fs.rm(home, { recursive: true, force: true });
+  }
+});
+
+test("helper sessions: headless and tagged ones are not listed, and only the reviewer's strays are moved to the trash", async () => {
+  const fs = await import("node:fs/promises");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const data = await fs.mkdtemp(path.join(os.tmpdir(), "gm-help-data-"));
+  const grok = await fs.mkdtemp(path.join(os.tmpdir(), "gm-help-grok-"));
+  process.env.DATA_DIR = data;
+  process.env.GROK_HOME = grok;
+  const sessions = await import("../lib/sessions.js");
+  const skeptic = await import("../lib/skeptic.js");
+  const cwd = "/work/proj";
+  const group = path.join(grok, "sessions", encodeURIComponent(cwd));
+  const id = (n) => "0000000" + n + "-aaaa-bbbb-cccc-dddddddddddd";
+  const at = Date.now();
+  const make = async (n, extra) => {
+    const dir = path.join(group, id(n));
+    await fs.mkdir(dir, { recursive: true });
+    await fs.writeFile(path.join(dir, "summary.json"), JSON.stringify({ info: { id: id(n), cwd }, created_at: new Date(at - 1000).toISOString(), ...extra }));
+  };
+  await make(1, {});                                                   // the user's own session
+  await make(2, { session_kind: "headless", agent_name: "skeptic" });  // a reviewer run, inside the review window
+  await make(3, { session_kind: "headless", agent_name: "someone-else" }); // another headless run: not ours to move
+  await make(4, { session_kind: "subagent" });
+  await make(5, { session_kind: "headless", agent_name: "skeptic", created_at: new Date(at - 3 * 3600 * 1000).toISOString() }); // long before any review
+  await sessions.setSessionPrefs(id(1), { cwd });
+  await fs.mkdir(path.join(data, "skeptic"), { recursive: true });
+  await fs.writeFile(path.join(data, "skeptic", id(1) + ".json"), JSON.stringify({ history: [{ at, tokens: 1 }] }));
+  const listed = async () => (await sessions.listSessions()).map((row) => row.id).sort();
+  assert.deepEqual(await listed(), [id(1)], "headless and subagent sessions are never top-level");
+  assert.equal(sessions.isHelperSession(id(1), { session_kind: "headless" }, {}), true);
+  assert.equal(sessions.isHelperSession(id(1), {}, { helpers: { [id(1)]: { parent: "x" } } }), true, "a tag with a parent hides it too");
+  assert.equal(sessions.isHelperSession(id(1), {}, {}), false);
+  assert.equal(await skeptic.sweepStrayReviewSessions(), 1);
+  const trashed = await fs.readdir(path.join(data, "trash"));
+  assert.equal(trashed.length, 1);
+  assert.ok(trashed[0].startsWith(id(2)));
+  for (const n of [1, 3, 4, 5]) await fs.access(path.join(group, id(n), "summary.json"));
+  assert.equal(await skeptic.sweepStrayReviewSessions(), 0, "a second sweep finds nothing");
+  // A run that just ended is tagged with the session it served.
+  await make(6, { session_kind: "headless", agent_name: "skeptic", created_at: new Date(Date.now() + 2000).toISOString() });
+  assert.deepEqual(await sessions.tagHelperSessions({ cwd, since: Date.now() + 1000, parent: id(1), kind: "review" }), [id(6)]);
+  assert.equal((await sessions.getMeta()).helpers[id(6)].parent, id(1));
+});
+
+test("ask_user_question: the reducer shows one card in place of the tool step, and history rebuilds it with what was answered", async () => {
+  const { applyQuestions } = await import("../lib/history.js");
+  const questions = [{ question: "Which colour?", multiSelect: false, options: [{ label: "Red", description: "R" }] }];
+  const state = { messages: [], n: 0 };
+  applyEvent(state, { type: "tool_call", toolCallId: "t1", toolName: "ask_user_question", title: "ask_user_question" });
+  applyEvent(state, { type: "question", reqId: "q1", toolCallId: "t1", questions, from: "" });
+  assert.deepEqual(state.messages.map((m) => m.role), ["question"], "the tool step is replaced by the card");
+  assert.equal(state.waiting, 1);
+  applyEvent(state, { type: "tool_call_update", toolCallId: "t1", status: "completed" });
+  assert.deepEqual(state.messages.map((m) => m.role), ["question"], "later updates to the tool call are not drawn");
+  applyEvent(state, { type: "question_resolved", reqId: "q1", outcome: "accepted", answers: ["Red"], by: "user" });
+  assert.deepEqual([state.messages[0].status, state.messages[0].answers, state.waiting], ["answered", ["Red"], 0]);
+  const other = { messages: [], n: 0 };
+  applyEvent(other, { type: "question", reqId: "q2", toolCallId: "t2", questions });
+  applyEvent(other, { type: "end", stopReason: "end_turn" });
+  assert.equal(other.messages[0].status, "cancelled", "a question still open when the turn ends is closed");
+  const disk = [{ id: "tool:t1", role: "tool", tool: { id: "t1", name: "ask_user_question", status: "completed", input: JSON.stringify({ questions }) } }, { id: "tool:x", role: "tool", tool: { id: "x", name: "bash", status: "completed", input: "{}" } }];
+  const rebuilt = applyQuestions(disk, { t1: { status: "answered", answers: ["Red"], by: "user" } });
+  assert.deepEqual(rebuilt.map((m) => m.role), ["question", "tool"]);
+  assert.deepEqual([rebuilt[0].status, rebuilt[0].answers, rebuilt[0].questions[0].options[0].label], ["answered", ["Red"], "Red"]);
+  assert.equal(applyQuestions(disk, {})[0].status, "answered", "no record: the tool finished, so it was answered");
+  assert.equal(applyQuestions([{ ...disk[0], tool: { ...disk[0].tool, status: "failed" } }], {})[0].status, "cancelled");
+});
+
+// A small pstack-shaped plugin: user-only skills, a sibling reference folder, a link to another skill.
+async function fakePstack(dir) {
+  const skill = async (name, head, body) => {
+    await fsp.mkdir(path.join(dir, "skills", name), { recursive: true });
+    await fsp.writeFile(path.join(dir, "skills", name, "SKILL.md"), "---\n" + head + "\n---\n" + body);
+  };
+  await skill("poteto-mode", "name: Poteto Mode\ndescription: poteto's agent style. Use for /poteto-mode.\ndisable-model-invocation: true\nmode: true", "Read [Fix Root Causes](../principle-fix-root-causes/SKILL.md) and playbooks/bug.md.\n");
+  await skill("principle-fix-root-causes", "name: principle-fix-root-causes\ndescription: >\n  Apply when debugging.\n  Trace each symptom to its root.\ndisable-model-invocation: true", "Ask why five times.\n");
+  await fsp.mkdir(path.join(dir, "skills", "poteto-mode", "playbooks"), { recursive: true });
+  await fsp.writeFile(path.join(dir, "skills", "poteto-mode", "playbooks", "bug.md"), "Reproduce first.\n");
+  await fsp.mkdir(path.join(dir, ".cursor-plugin"), { recursive: true });
+  await fsp.writeFile(path.join(dir, ".cursor-plugin", "plugin.json"), JSON.stringify({ name: "pstack", version: "9.9.9", author: { name: "Lauren Tan" } }));
+  await fsp.writeFile(path.join(dir, "README.md"), "pstack readme\n");
+}
+
+test("pstack skills become model-invocable Grok skills without touching the vendored copy", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "gm-pstack-"));
+  try {
+    const src = path.join(dir, "pstack");
+    await fakePstack(src);
+    const before = await fsp.readFile(path.join(src, "skills", "poteto-mode", "SKILL.md"), "utf8");
+    const out = await buildSkillPlugin(src, { root: path.join(dir, "plugins") });
+    const skill = await fsp.readFile(path.join(out, "skills", "poteto-mode", "SKILL.md"), "utf8");
+    assert.doesNotMatch(skill, /disable-model-invocation/);
+    assert.equal(frontmatterField(skill, "description"), "poteto's agent style. Use for /poteto-mode.");
+    assert.equal(skill.split("\n---\n")[1], before.split("\n---\n")[1], "the body is unchanged");
+    assert.match(skill, /mode: true/);
+    // Links inside a skill still resolve from the mirror.
+    assert.equal(await fsp.readFile(path.join(out, "skills", "poteto-mode", "..", "principle-fix-root-causes", "SKILL.md"), "utf8").then((t) => frontmatterField(t, "description")), "Apply when debugging. Trace each symptom to its root.");
+    assert.equal(await fsp.readFile(path.join(out, "skills", "poteto-mode", "playbooks", "bug.md"), "utf8"), "Reproduce first.\n");
+    assert.equal(await fsp.readFile(path.join(out, "README.md"), "utf8"), "pstack readme\n");
+    assert.equal(JSON.parse(await fsp.readFile(path.join(out, ".grok-plugin", "plugin.json"), "utf8")).name, "pstack");
+    assert.equal(await fsp.readFile(path.join(src, "skills", "poteto-mode", "SKILL.md"), "utf8"), before, "vendored file untouched");
+    // Same pstack, same folder; a changed pstack gets a new one and the old stays for running processes.
+    assert.equal(await buildSkillPlugin(src, { root: path.join(dir, "plugins") }), out);
+    await fsp.appendFile(path.join(src, "skills", "principle-fix-root-causes", "SKILL.md"), "More.\n");
+    const next = await buildSkillPlugin(src, { root: path.join(dir, "plugins") });
+    assert.notEqual(next, out);
+    assert.match(await fsp.readFile(path.join(next, "skills", "principle-fix-root-causes", "SKILL.md"), "utf8"), /More\./);
+    await fsp.access(path.join(out, "skills", "poteto-mode", "SKILL.md"));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("the skill picker lists Grok's skills, never its built-in commands", () => {
+  const list = skillsFromCommands([
+    { name: "always-approve", description: "Toggle always-approve mode", input: { hint: "on|off" } },
+    { name: "deep-research", description: "Research", _meta: { workflowSource: "builtin", workflowPath: "/x/deep-research.rhai" } },
+    { name: "user:interrogate", description: "Mine", _meta: { scope: "user", path: "/home/j/.grok/skills/interrogate/SKILL.md" } },
+    { name: "tdd", description: "Use only when\n the user asks for TDD.", _meta: { scope: "local", path: "/d/plugins/pstack-0123456789ab/skills/tdd/SKILL.md" } },
+    { name: "pstack:interrogate", description: "pstack's", _meta: { scope: "local", path: "/d/plugins/pstack-0123456789ab/skills/interrogate/SKILL.md" } },
+  ]);
+  assert.deepEqual(list.map((s) => [s.name, s.source]), [["pstack:interrogate", "pstack"], ["tdd", "pstack"], ["user:interrogate", "user"]]);
+  assert.equal(list[1].description, "Use only when the user asks for TDD.");
+  assert.deepEqual(skillsFromCommands(null), []);
 });
