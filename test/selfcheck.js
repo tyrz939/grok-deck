@@ -19,7 +19,7 @@ import fsp from "node:fs/promises";
 import { hasDone, intervalLabel, parseInterval, parseLoopCommand, runLabel, validateLoop } from "../lib/loops.js";
 
 test("allows only loopback and Tailscale", () => {
-  for (const ip of ["127.0.0.1", "127.0.0.2", "::1", "::ffff:127.0.0.1", "100.64.0.1", "100.82.195.43", "100.127.255.255"]) {
+  for (const ip of ["127.0.0.1", "127.0.0.2", "::1", "::ffff:127.0.0.1", "100.64.0.1", "100.64.0.10", "100.127.255.255"]) {
     assert.equal(isAllowedIp(ip), true, ip);
   }
   for (const ip of ["8.8.8.8", "10.1.2.3", "192.168.1.50", "172.16.0.1", "172.31.255.255", "1.1.1.1", "100.63.1.1", "100.128.0.1", "0.0.0.0", "", "not-an-ip"]) {
