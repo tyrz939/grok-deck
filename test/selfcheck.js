@@ -268,9 +268,9 @@ test("tracks subagents, nested steps and their approvals", async () => {
   assert.equal(hist[0].sub.summary, "Ship it.");
 });
 
-import { buildPacket, claimsDone, extractVerdict, issuesPrompt, normalizeVerdict, riskSignals, shouldReview } from "../lib/skeptic.js";
+import { buildPacket, cancelDisposition, claimsDone, extractVerdict, issuesPrompt, longRunReviewOutcome, normalizeVerdict, riskSignals, shouldReview } from "../lib/skeptic.js";
 import { isCheckCommand, newProof, proofSummary, proofVerdict, trackProof } from "../lib/evidence.js";
-import { LONG_RULES, longrunKeyword, parseGoal, parseProgress, ranClean } from "../lib/longrun.js";
+import { LONG_RULES, backoffMs, budgetExceeded, longrunKeyword, parseGoal, parseProgress, ranClean, stuckAction } from "../lib/longrun.js";
 import { reviewerArgs } from "../lib/skeptic.js";
 import { canOpenWake, noteSubagentTokens, watchPayload } from "../lib/runner.js";
 import { clearCookie } from "../lib/auth.js";
@@ -1198,6 +1198,32 @@ test("long run panel: GOAL.md checklist and checks, PROGRESS.md now / last / nex
   assert.equal(parseProgress("## Next\n- [x] finished early\n- real next\n").next, "real next");
 });
 
+test("long run overnight: backoff escalates, budget is a hard stop, stuck nudges precede any pause", () => {
+  assert.equal(backoffMs(0, 1000, 60000), 1000);
+  assert.equal(backoffMs(1, 1000, 60000), 2000);
+  assert.equal(backoffMs(3, 1000, 60000), 8000);
+  assert.equal(backoffMs(99, 1000, 60000), 60000, "backoff is capped, never unbounded");
+  const run = { startedAt: 0, hours: 12, tokens: 40e6, usedTokens: 0, skepticTokens: 0 };
+  assert.equal(budgetExceeded(run, 11 * 3600000), false);
+  assert.equal(budgetExceeded(run, 12 * 3600000), true, "time budget stops the run");
+  assert.equal(budgetExceeded({ ...run, usedTokens: 40e6 }, 0), true, "token budget stops the run");
+  assert.equal(stuckAction(2, 0), "");
+  assert.equal(stuckAction(3, 0), "nudge");
+  assert.equal(stuckAction(3, 1), "nudge");
+  assert.equal(stuckAction(3, 2), "pause", "only after the nudges are exhausted does it pause for the user");
+  // BLOCKED is parsed as its own status (the other legitimate stop), distinct from CONTINUE.
+  assert.equal(longrunKeyword("summary\nLONGRUN: BLOCKED need a key"), "BLOCKED");
+});
+
+test("skeptic cancellation: a superseding turn is normal and re-queues; the user's own cancel is visible", () => {
+  assert.deepEqual(cancelDisposition("superseded"), { superseded: true, cancelKind: "superseded" });
+  assert.deepEqual(cancelDisposition("user"), { superseded: false, cancelKind: "user" });
+  assert.equal(longRunReviewOutcome({ state: "cancelled", cancelKind: "superseded" }).requeue, true, "unchecked DONE must not pass");
+  assert.equal(longRunReviewOutcome({ state: "cancelled", cancelKind: "user" }).ok, true, "the user cancelling the review is his call");
+  assert.equal(longRunReviewOutcome({ state: "pass" }).ok, true);
+  assert.equal(longRunReviewOutcome({ state: "issues", issues: [{ severity: "high" }] }).ok, false);
+});
+
 test("long run steering: PAUSE is a status word, and the rules keep approvals and name the change", () => {
   assert.equal(longrunKeyword("ok\nSTEERING: dropped the docs item\nLONGRUN: PAUSE"), "PAUSE");
   assert.equal(longrunKeyword("LONGRUN: PAUSE\nmore text"), "");
@@ -1205,4 +1231,156 @@ test("long run steering: PAUSE is a status word, and the rules keep approvals an
   assert.match(rules, /approves nothing/);
   assert.match(rules, /STEERING:/);
   assert.match(rules, /Never push/);
+});
+
+test("artifacts: file events decide what counts, one version per turn, unchanged content adds nothing, the store serves only by id", async () => {
+  const fs = await import("node:fs/promises");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const data = await fs.mkdtemp(path.join(os.tmpdir(), "gm-art-data-"));
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "gm-art-cwd-"));
+  process.env.DATA_DIR = data;
+  const art = await import("../lib/artifacts.js");
+  // Which files count: documents on any edit, code only when the whole file was written, never tooling noise.
+  assert.equal(art.artifactKind("/p/site/index.html", false), "html");
+  assert.equal(art.artifactKind("/p/notes/plan.md", false), "markdown");
+  assert.equal(art.artifactKind("/p/data.tsv", false), "csv");
+  assert.equal(art.artifactKind("/p/logo.svg", false), "svg");
+  assert.equal(art.artifactKind("/p/src/app.js", false), "", "an edit to existing code is not an artifact");
+  assert.equal(art.artifactKind("/p/scripts/report.py", true), "code", "a script written whole is");
+  assert.equal(art.artifactKind("/p/node_modules/x/README.md", false), "");
+  assert.equal(art.artifactKind("/p/dist/index.html", false), "");
+  assert.equal(art.artifactKind("/p/.grok-deck/uploads/brief.md", false), "", "the user's own attachments are not artifacts");
+  assert.equal(art.artifactKind("/p/app.min.js", true), "");
+  assert.equal(art.artifactKind("/p/image.png", true), "", "binary types are not artifacts");
+  // Titles: the document's own title, else the file name humanised.
+  assert.equal(art.humanTitle("/p/landing-page_v2.html"), "Landing page v2");
+  assert.equal(art.humanTitle("/p/README.md"), "README");
+  assert.equal(art.ownTitle("html", "<html><head><title>Q3 &amp; Q4</title>"), "Q3 & Q4");
+  assert.equal(art.ownTitle("markdown", "intro\n# The *plan*\n## sub"), "The plan");
+  // ACP diff items are the signal; an empty oldText (or Grok's write tool) is a whole-file write.
+  assert.deepEqual(art.diffTargets({ content: [{ type: "diff", path: "/a.js", oldText: "", newText: "x" }, { type: "content", content: { text: "hi" } }] }, "edit"), [{ path: "/a.js", whole: true }]);
+  assert.deepEqual(art.diffTargets({ content: [{ type: "diff", path: "/a.js" }] }, "write"), [{ path: "/a.js", whole: true }]);
+  assert.deepEqual(art.diffTargets({ content: [{ type: "diff", path: "/a.js", oldText: "a", newText: "b" }] }, "search_replace"), [{ path: "/a.js", whole: false }]);
+
+  const sid = "11111111-2222-3333-4444-555555555555";
+  const page = path.join(cwd, "page.html");
+  await fs.writeFile(page, "<title>Demo page</title><h1>one</h1>");
+  const first = await art.recordEdit(sid, { file: page, whole: true, cwd, turnKey: "t1", callId: "c1" });
+  assert.equal(first.title, "Demo page");
+  assert.equal(first.versions.length, 1);
+  await fs.writeFile(page, "<title>Demo page</title><h1>one, fixed</h1>");
+  const amended = await art.recordEdit(sid, { file: page, whole: false, cwd, turnKey: "t1", callId: "c2" });
+  assert.equal(amended.versions.length, 1, "edits in one turn amend that turn's version");
+  assert.deepEqual(amended.versions[0].calls, ["c1", "c2"]);
+  assert.equal(await art.recordEdit(sid, { file: page, whole: false, cwd, turnKey: "t2", callId: "c3" }), null, "a turn that changes nothing adds no version");
+  await fs.writeFile(page, "<title>Renamed later</title><h1>two</h1>");
+  const second = await art.recordEdit(sid, { file: page, whole: false, cwd, turnKey: "t3", callId: "c4" });
+  assert.deepEqual(second.versions.map((v) => v.v), [1, 2]);
+  assert.equal(second.title, "Demo page", "the title stays the same across versions");
+  assert.notEqual(second.versions[0].h, second.versions[1].h);
+  // Not artifacts: binary content, outside every allowed folder, secrets, an edit to existing code.
+  await fs.writeFile(path.join(cwd, "bin.md"), Buffer.from([0x23, 0, 1, 2]));
+  assert.equal(await art.recordEdit(sid, { file: path.join(cwd, "bin.md"), whole: true, cwd, turnKey: "t3" }), null);
+  await fs.writeFile(path.join(cwd, ".env"), "SECRET=1");
+  assert.equal(await art.recordEdit(sid, { file: path.join(cwd, ".env"), whole: true, cwd, turnKey: "t3" }), null);
+  await fs.writeFile(path.join(cwd, "app.js"), "let x = 1;");
+  assert.equal(await art.recordEdit(sid, { file: path.join(cwd, "app.js"), whole: false, cwd, turnKey: "t3" }), null);
+  assert.equal(await art.recordEdit(sid, { file: "/etc/hostname", whole: true, cwd, turnKey: "t3" }), null);
+
+  const list = await art.listArtifacts(sid);
+  assert.equal(list.length, 1);
+  const v1 = await art.artifactFile(sid, list[0].id, 1);
+  assert.equal(await fs.readFile(v1.file, "utf8"), "<title>Demo page</title><h1>one, fixed</h1>");
+  assert.equal(await art.artifactFile(sid, list[0].id, 9), null);
+  assert.equal(await art.artifactFile(sid, "../../etc/passwd", 1), null);
+  assert.equal(await art.artifactFile("../x", list[0].id, 1), null);
+  // HTML goes out sandboxed: no same-origin, no network, framed only by Grok Deck.
+  const h = art.artifactHeaders(list[0], false);
+  assert.match(h["Content-Security-Policy"], /sandbox allow-scripts/);
+  assert.doesNotMatch(h["Content-Security-Policy"], /allow-same-origin/);
+  assert.match(h["Content-Security-Policy"], /connect-src 'none'/);
+  assert.equal(art.artifactHeaders(list[0], true)["Content-Type"], "application/octet-stream");
+  // Deleting the session moves its artifacts to the trash.
+  assert.equal(await art.trashArtifacts(sid), true);
+  assert.deepEqual(await art.listArtifacts(sid), []);
+  assert.ok((await fs.readdir(path.join(data, "trash"))).some((name) => name.startsWith(sid + "-artifacts-")));
+  await fs.rm(data, { recursive: true, force: true });
+  await fs.rm(cwd, { recursive: true, force: true });
+});
+
+test("artifacts: 3D models are the one binary kind, versioned like the rest, and found by a bounded scan", async () => {
+  const fs = await import("node:fs/promises");
+  const os = await import("node:os");
+  const { bracket } = await import("./glb.js");
+  const data = await fs.mkdtemp(path.join(os.tmpdir(), "gm-art3d-data-"));
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "gm-art3d-cwd-"));
+  process.env.DATA_DIR = data;
+  const art = await import("../lib/artifacts.js");
+  for (const ext of ["glb", "gltf", "stl", "obj", "GLB"]) assert.equal(art.artifactKind("/p/cad/bracket." + ext, false), "model3d", ext);
+  assert.equal(art.artifactKind("/p/node_modules/x/model.glb", false), "");
+  assert.equal(art.artifactKind("/p/.grok-deck/uploads/model.stl", false), "");
+
+  const sid = "22222222-3333-4444-5555-666666666666";
+  const glb = path.join(cwd, "bracket.glb");
+  const v1Bytes = bracket(0.06);
+  assert.ok(v1Bytes.includes(0), "a GLB carries NUL bytes");
+  await fs.writeFile(glb, v1Bytes);
+  const first = await art.recordEdit(sid, { file: glb, whole: true, cwd, turnKey: "t1", callId: "c1" });
+  assert.equal(first.kind, "model3d");
+  assert.equal(first.title, "Bracket");
+  assert.equal(first.versions[0].size, v1Bytes.length);
+  // The same bytes in a NUL-carrying text file are still refused: binary is allowed by kind, not by sniffing.
+  await fs.writeFile(path.join(cwd, "bracket.md"), v1Bytes);
+  assert.equal(await art.recordEdit(sid, { file: path.join(cwd, "bracket.md"), whole: true, cwd, turnKey: "t1" }), null);
+  await fs.writeFile(path.join(cwd, "bracket.py"), v1Bytes);
+  assert.equal(await art.recordEdit(sid, { file: path.join(cwd, "bracket.py"), whole: true, cwd, turnKey: "t1" }), null);
+  // An unchanged model adds no version; a changed one in a new turn is v2.
+  assert.equal(await art.recordEdit(sid, { file: glb, whole: true, cwd, turnKey: "t2", callId: "c2" }), null);
+  await fs.writeFile(glb, bracket(0.09));
+  const second = await art.recordEdit(sid, { file: glb, whole: true, cwd, turnKey: "t3", callId: "c3" });
+  assert.deepEqual(second.versions.map((v) => v.v), [1, 2]);
+  assert.notEqual(second.versions[0].h, second.versions[1].h);
+  const v1 = await art.artifactFile(sid, second.id, 1);
+  assert.ok((await fs.readFile(v1.file)).equals(v1Bytes), "v1 is kept byte for byte");
+  // The size cap holds for models too.
+  const big = path.join(cwd, "huge.stl");
+  await fs.writeFile(big, Buffer.alloc(art.MAX_ARTIFACT + 1, 1));
+  assert.equal(await art.recordEdit(sid, { file: big, whole: true, cwd, turnKey: "t3" }), null);
+  // Headers: the model type inline, octet-stream for a download; no sandbox CSP is needed because nothing renders it.
+  const list = await art.listArtifacts(sid);
+  const model = list.find((a) => a.kind === "model3d");
+  assert.equal(art.artifactHeaders(model, false)["Content-Type"], "model/gltf-binary");
+  assert.equal(art.artifactHeaders(model, true)["Content-Type"], "application/octet-stream");
+  assert.equal(art.artifactHeaders({ ...model, ext: "gltf" }, false)["Content-Type"], "model/gltf+json");
+  assert.equal(art.artifactHeaders({ ...model, ext: "stl" }, false)["Content-Type"], "model/stl");
+  assert.equal(art.artifactHeaders({ ...model, ext: "obj" }, false)["Content-Type"], "model/obj");
+  assert.equal(art.artifactHeaders({ kind: "code", name: "a.py" }, false)["Content-Type"], "text/plain; charset=utf-8");
+
+  // The scan: model files under the working folder modified since the turn began, nothing else.
+  const since = Date.now() - 1;
+  await fs.mkdir(path.join(cwd, "cad", "deep"), { recursive: true });
+  await fs.mkdir(path.join(cwd, "node_modules"), { recursive: true });
+  await fs.mkdir(path.join(cwd, ".cache"), { recursive: true });
+  await fs.writeFile(path.join(cwd, "cad", "deep", "part.stl"), "solid x\nendsolid x\n");
+  await fs.writeFile(path.join(cwd, "cad", "notes.md"), "# not a model");
+  await fs.writeFile(path.join(cwd, "node_modules", "dep.glb"), v1Bytes);
+  await fs.writeFile(path.join(cwd, ".cache", "hidden.obj"), "v 0 0 0");
+  const old = path.join(cwd, "old.obj");
+  await fs.writeFile(old, "v 0 0 0");
+  await fs.utimes(old, new Date(since - 60000), new Date(since - 60000));
+  const found = (await art.findModels(cwd, since)).map((f) => path.relative(cwd, f.path)).sort();
+  assert.deepEqual(found, ["cad/deep/part.stl"].map((p) => p.split("/").join(path.sep)), "only fresh models, outside noise and dot folders, under the size cap");
+  assert.deepEqual(await art.findModels(cwd, since, { depth: 1 }), [], "depth is bounded");
+  assert.deepEqual(await art.findModels("", since), []);
+  // The viewer reads a GLB's own JSON and refuses a glTF that points outside itself.
+  const viewer = await import("../public/model3d.js");
+  const json = viewer.glbJson(new Uint8Array(v1Bytes).buffer);
+  assert.equal(json.asset.version, "2.0");
+  assert.equal(viewer.glbJson(new TextEncoder().encode("solid x").buffer), null);
+  assert.deepEqual(viewer.externalUris(json), []);
+  assert.deepEqual(viewer.externalUris({ buffers: [{ uri: "data:application/octet-stream;base64,AA==" }, { uri: "parts.bin" }], images: [{ uri: "../tex.png" }] }), ["parts.bin", "../tex.png"]);
+
+  await fs.rm(data, { recursive: true, force: true });
+  await fs.rm(cwd, { recursive: true, force: true });
 });

@@ -12,7 +12,8 @@ Node only: no npm dependencies and no build step.
 - Send now (interrupt) and Send next (persistent queue) while a turn is running.
 - Reliability: stall watchdog with auto-resume, crash and restart recovery, continue-until-done, and stale-state refresh.
 - Proof before done: a turn that edits code without a passing check after the last edit is flagged "Unverified".
-- Long-run mode: multi-hour autonomous runs gated on `GOAL.md` checks, with a no-progress pause, steering by normal message, and an expandable progress panel.
+- Long-run mode: multi-hour autonomous runs gated on `GOAL.md` checks, with steering by normal message, an expandable progress panel, and overnight self-recovery (stuck nudges, resume retries); it only stops for a real block, Stop run, or the budget.
+- Artifacts: files Grok writes (HTML, Markdown, SVG, CSV, and 3D models `.glb` / `.gltf` / `.stl` / `.obj`) become versioned cards with a sandboxed preview panel; 3D models open an interactive viewer.
 - Deep mode: a standalone rigor toggle (planner, builder and reviewer) with pstack's poteto-mode router mandatory.
 - Optional skeptical review: a fresh, read-only Grok rechecks turns that claim done and returns an evidence-backed verdict.
 - `/loop` scheduler for recurring prompts.
@@ -80,6 +81,12 @@ On iPhone: open the tailnet HTTPS URL in Safari, log in, Share, Add to Home Scre
 - Each run shows in the chat as **Loop run 3 of 10 · every 30m**. Push only on a failed run or DONE, not on every run.
 - + menu → Loops: next run time, runs so far, pause, resume, delete.
 
+## Artifacts
+
+When Grok writes an HTML, Markdown, SVG or CSV file, or a 3D model (`.glb`, `.gltf`, `.stl`, `.obj`), Grok Deck turns it into a titled card in the chat. Tap the card to open a preview panel (full-screen on phone, side panel on desktop): HTML runs sandboxed, Markdown renders, and 3D models open an interactive viewer (drag to rotate, pinch or scroll to zoom). Every edit becomes a new version in the same card, so you can switch between v1 and v2. Copy and download are available from the panel. Models are capped at 2 MB; a model that points to external files will not draw.
+
+The Three.js viewer is vendored under `public/vendor/three/` (MIT). Files made only through shell commands (not Grok's file-write tools) are not detected as artifacts yet.
+
 ## Skills (pstack)
 
 Every session has the full [pstack](https://github.com/cursor/plugins/tree/main/pstack) skill set by Lauren Tan ([poteto](https://github.com/poteto)), MIT licensed, vendored as the submodule `vendor/cursor-plugins` (set `PSTACK_DIR` to use another checkout). Thanks to poteto for writing it. 50 pstack skills are advertised in a session; 52 skill folders are vendored.
@@ -97,7 +104,7 @@ Deep mode is a standalone toggle chip in the composer bottom row, after the Reas
 
 Long run is the unsupervised goal mode. Give it a goal; it keeps `GOAL.md` (objective and `## Checks`) and `PROGRESS.md`, and continues until DONE is accepted, it reports BLOCKED, or a budget is hit (12 hours by default, and a token budget, 40M tokens by default).
 
-You can steer it while it runs: send a normal message and the loop pauses, takes the message as a steering turn, then resumes with the goal unless you tell it to stop. The long run bar above the composer expands into a panel with Progress (Now, Last done, Next from `PROGRESS.md`), the `GOAL.md` checklist, each check with Pass, Fail or Not run, and Budget (time, turns, tokens, last activity).
+You can steer it while it runs: send a normal message and the loop pauses, takes the message as a steering turn, then resumes with the goal unless you tell it to stop. Overnight, a stalled or failed resume retries on its own; a stuck run gets nudged before it pauses for you. The long run bar above the composer expands into a panel with Progress (Now, Last done, Next from `PROGRESS.md`), the `GOAL.md` checklist, each check with Pass, Fail or Not run, and Budget (time, turns, tokens, last activity).
 
 ![Long run panel on a phone](docs/screenshots/longrun-panel-390.png)
 
@@ -111,7 +118,7 @@ You can steer it while it runs: send a normal message and the loop pauses, takes
 - One running turn per session. A second send returns an error until the first finishes. "Send next" messages are saved to `data/queue.json`, so they survive a restart.
 - A dropped connection replays the live turn from the last event id. Refreshing also reloads the transcript, then continues from the cursor, so messages are not appended twice. If this Node process restarts, the in-memory buffer is gone. The transcript on disk is what you get back. Grok itself keeps the session.
 - Very long transcripts keep the latest portion of `updates.jsonl` (about the last 6 MB).
-- Long runs: DONE is only accepted after GOAL.md `## Checks` pass. With approvals off (Always-approve or Auto approve all) the app runs them itself; under Ask it accepts DONE only if every check command ran in that turn and exited 0 (read from Grok's own tool results). A run pauses after 3 turns with no new commit, no change to tracked files and no PROGRESS.md change. The watchdog restarts a turn that has been silent for 25 minutes, but never while an approval is waiting or a tool call is still running (up to 3 hours). A service restart never pauses a run; the watchdog resumes it.
+- Long runs: DONE is only accepted after GOAL.md `## Checks` pass. With approvals off (Always-approve or Auto approve all) the app runs them itself; under Ask it accepts DONE only if every check command ran in that turn and exited 0 (read from Grok's own tool results). After 3 turns with no new commit, no tracked-file change and no PROGRESS.md change it nudges Grok to try a different approach (twice) before pausing; failed resumes retry with backoff so overnight runs keep going. It only stops for LONGRUN: BLOCKED/PAUSE, Stop run, or the budget. The watchdog restarts a turn that has been silent for 25 minutes, but never while an approval is waiting or a tool call is still running (up to 3 hours). A service restart never pauses a run; the watchdog resumes it.
 - Escalation: `~/.grok/bin/grok-escalate <strong|ultra-planner|ultra-builder|ultra-reviewer> "task"` runs a real xhigh worker from the tier's agent file. It runs headless with your global Grok permission setting (`config.toml` has always-approve), so under Ask mode your approval of the `grok-escalate` command is the only prompt.
 - Skeptical review: a second `grok -p` in a fresh context (no `--resume`, no subagents, edit tools removed, `agents/skeptic.md`) rechecks a turn that claims done. It reruns the tests, tries edge cases, and returns a verdict. The card above the composer shows Pass or Issues (with evidence, unverified claims, tokens and cost), with "Send issues to Grok" and Dismiss. Findings with no evidence are demoted to "unverified". Off by default; set it in App settings (default for all sessions) or per session from the + menu or Session settings: Off, Auto (only when the turn changed files, claims done, and is risky or larger: more than 3 files or 80 lines, no passing check after the last edit, a risky path, or Deep mode), or every turn that changed files. "Review this turn now" always works. Auto-loop (off by default) sends high and medium issues back by itself, up to N rounds (1 to 4), and stops on a repeat, the round limit, a message from you, or Stop. It never nags: one review per diff hash, Dismiss is sticky, a 5-minute cooldown, an hourly cap (default 6 reviews), a daily token budget per session, and three dismissed Issues cards turn Auto off for that session. In a long run it is a second DONE gate after GOAL.md `## Checks` pass: issues reject the DONE; after N rejections the run goes to Blocked for you; a reviewer failure never traps a run. It runs with the global always-approve setting (the same as `grok-escalate`), so the reviewer must not edit files: edit tools are removed, and the tree is compared before and after (a changed tree discards the verdict as tainted). The agent file is `agents/skeptic.md`.
 - One password, one user.

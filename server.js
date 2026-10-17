@@ -53,6 +53,7 @@ import {
 } from "./lib/sessions.js";
 import { applyQuestions } from "./lib/history.js";
 import { internMessages, internTarget, mediaType, statMedia } from "./lib/media.js";
+import { artifactFile, artifactHeaders, listArtifacts, trashArtifacts } from "./lib/artifacts.js";
 import { MAX_UPLOAD, saveUpload, sizeLabel } from "./lib/uploads.js";
 import { PSTACK_CREDIT, pstackPlugin, skillsFor } from "./lib/skills.js";
 import { getTheme, neutralThemeColor, neutralVars, themeCss } from "./lib/theme.js";
@@ -79,7 +80,7 @@ function withSecurity(headers) {
     "Referrer-Policy": "no-referrer",
     "X-Frame-Options": "DENY",
     "Content-Security-Policy":
-      "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; script-src 'self'; connect-src 'self'; manifest-src 'self'; base-uri 'none'; frame-ancestors 'none'",
+      "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; script-src 'self'; connect-src 'self' data: blob:; manifest-src 'self'; base-uri 'none'; frame-ancestors 'none'",
     ...headers,
   };
 }
@@ -498,6 +499,7 @@ async function handleApi(req, res, url) {
       return;
     }
     const removed = await trashSession(id);
+    await trashArtifacts(id);
     forgetTurn(id);
     console.log("session deleted", id, removed ? "(moved to trash)" : "(meta only)");
     sendJson(res, 200, { ok: true });
@@ -522,6 +524,30 @@ async function handleApi(req, res, url) {
     const turn = getTurn(recheckMatch[1]);
     const url = await internTarget(target, { cwd: turn?.cwd || found.cwd, dir: found.dir });
     sendJson(res, 200, { url });
+    return;
+  }
+
+  // Artifacts: the files Grok made in this session, one entry per file with its versions (lib/artifacts.js).
+  const artListMatch = pathname.match(/^\/api\/sessions\/([0-9a-f-]{36})\/artifacts$/i);
+  if (artListMatch && req.method === "GET") {
+    sendJson(res, 200, { artifacts: await listArtifacts(artListMatch[1].toLowerCase()) });
+    return;
+  }
+  // One version, by artifact id and number only, from the snapshot store. HTML and SVG carry a sandbox CSP.
+  const artFileMatch = pathname.match(/^\/api\/sessions\/([0-9a-f-]{36})\/artifacts\/([0-9a-f]{16})\/(\d{1,4})$/i);
+  if (artFileMatch && (req.method === "GET" || req.method === "HEAD")) {
+    const found = await artifactFile(artFileMatch[1].toLowerCase(), artFileMatch[2], artFileMatch[3]);
+    if (!found) {
+      sendJson(res, 404, { error: "Not found" });
+      return;
+    }
+    const headers = { ...artifactHeaders(found.art, url.searchParams.get("download") === "1"), "Content-Length": found.size };
+    res.writeHead(200, withSecurity(headers));
+    if (req.method === "HEAD") {
+      res.end();
+      return;
+    }
+    fsSync.createReadStream(found.file).on("error", () => res.destroy()).pipe(res);
     return;
   }
 
@@ -635,7 +661,7 @@ async function handleApi(req, res, url) {
       return;
     }
     if (body.action === "cancel") {
-      cancelReview(id, "Cancelled by the user");
+      cancelReview(id, "Cancelled by the user", "user");
       sendJson(res, 200, { ok: true, skeptic: await reviewFor(id) });
       return;
     }

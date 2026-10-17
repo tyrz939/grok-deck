@@ -54,7 +54,7 @@ function widePng(width, height) {
 
 function paintedOverlaps(page) {
   return page.evaluate(() => {
-    const overlayOf = (el) => el.closest("#jump, #sheet, #setsheet, #confirm, #keys, #viewer, #docview, #update-note, #vv-debug, .picker");
+    const overlayOf = (el) => el.closest("#jump, #sheet, #setsheet, #confirm, #keys, #viewer, #docview, #artifact, #update-note, #vv-debug, .picker");
     const clips = (value) => value === "auto" || value === "scroll" || value === "hidden" || value === "clip";
     const closedAway = (el) => {
       let node = el.parentElement;
@@ -172,6 +172,7 @@ function startServer() {
       GM_LONGRUN_STALL_MS: "4000",
       GM_LONGRUN_TOOL_QUIET_MS: "60000",
       GM_LONGRUN_NEXT_MS: "300",
+      GM_LONGRUN_MAX_BACKOFF_MS: "2000",
       GM_SKEPTIC_COOLDOWN_MS: "0",
       GM_STALL_MS: "6000",
       GM_STALL_CHECK_MS: "500",
@@ -276,6 +277,28 @@ async function loadChromium(label) {
       return null;
     }
   }
+}
+
+// A unit cube as ASCII OBJ, for a 3D artifact written through Grok's write tool.
+const OBJ_CUBE = "v 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\nv 0 0 1\nv 1 0 1\nv 1 1 1\nv 0 1 1\nf 1 3 2\nf 1 4 3\nf 5 6 7\nf 5 7 8\nf 1 2 6\nf 1 6 5\nf 4 8 7\nf 4 7 3\nf 2 3 7\nf 2 7 6\nf 1 5 8\nf 1 8 4";
+
+// A cheap signature of what a WebGL canvas shows: lit pixels and a hash of a 64x64 downscale.
+function canvasSignature(selector) {
+  const c = document.querySelector(selector);
+  if (!c) return null;
+  const t = document.createElement("canvas");
+  t.width = 64;
+  t.height = 64;
+  const x = t.getContext("2d");
+  x.drawImage(c, 0, 0, 64, 64);
+  const d = x.getImageData(0, 0, 64, 64).data;
+  let lit = 0;
+  let hash = 0;
+  for (let i = 0; i < d.length; i += 4) {
+    if (d[i + 3] > 0) lit += 1;
+    hash = (hash * 31 + d[i] + d[i + 1] * 7 + d[i + 2] * 13 + d[i + 3]) % 1000000007;
+  }
+  return { lit, hash };
 }
 
 function launchChromium(chromium) {
@@ -661,14 +684,25 @@ try {
     assert.match(runFile(id).note, /Paused at your request: paused on request/);
   });
 
-  await check("no progress for 3 turns pauses the run; an uncommitted edit counts as progress", async () => {
-    const c = "[[say nothing new\\nLONGRUN: CONTINUE]]";
-    const dir = project("idle", { git: true, goal: GOAL, turns: [c, "[[write notes.txt edited]][[say LONGRUN: CONTINUE]]", c, c, c, c, c] });
+  await check("no progress: the run nudges Grok to try a different approach before it ever pauses", async () => {
+    const c = "[[say nothing new\nLONGRUN: CONTINUE]]";
+    const dir = project("idle", { git: true, goal: GOAL, turns: Array(14).fill(c) });
     const r = await api("POST", "/api/turns", { cwd: dir, prompt: c, permissionMode: "bypassPermissions", longRun: { hours: 1 } });
     const id = r.json.sessionId;
-    await waitFor(() => runFile(id).status === "paused", 25000, "paused");
-    assert.match(runFile(id).note, /no progress|no new commit/i);
-    assert.equal(prompts(id).length, 6, "expected pause after turn 6 (turn 3 edited a file)");
+    await waitFor(() => prompts(id).some((l) => /You appear stuck/.test(l) && /different approach/.test(l)), 25000, "stuck nudge sent instead of a silent pause");
+    assert.equal(runFile(id).status, "running", "the first no-progress stretch must nudge, not pause");
+    await waitFor(() => runFile(id).status === "paused", 40000, "paused after the nudges");
+    assert.match(runFile(id).note, /no progress/i);
+    assert.match(runFile(id).note, /nudge/i, "the pause must say the nudges were tried first");
+    assert.ok(prompts(id).filter((l) => /You appear stuck/.test(l)).length >= 2, "expected two stuck nudges before pausing");
+  });
+
+  await check("long run: repeated Grok crashes self-recover with backoff; the run never stalls for the user", async () => {
+    const dir = project("crashy", { git: true, goal: GOAL, turns: ["[[die 1]]", "[[die 1]]", "[[die 1]]", "[[die 1]]", "[[die 1]]", "[[die 1]]", "[[write x.txt 1]][[say LONGRUN: BLOCKED recovered]]"] });
+    const r = await api("POST", "/api/turns", { cwd: dir, prompt: "[[die 1]]", permissionMode: "bypassPermissions", longRun: { hours: 1 } });
+    const id = r.json.sessionId;
+    await waitFor(() => runFile(id).status === "blocked", 60000, "run recovered to BLOCKED instead of stalling");
+    assert.equal(runFile(id).note, "recovered");
   });
 
   await check("watchdog: a quiet tool and a pending approval are not stalls; a silent turn is restarted", async () => {
@@ -1006,6 +1040,18 @@ try {
     await api("POST", "/api/turns", { sessionId: id2, prompt: "[[say hi]]" });
     await waitFor(async () => (await skState(id2)).state === "cancelled", 10000, "cancelled by message");
     assert.match((await skState(id2)).note, /new message|new turn/);
+    assert.equal((await skState(id2)).superseded, true, "a superseding message is a normal cancellation, not an error card");
+  });
+
+  await check("a review superseded by a new turn is re-queued when the work is claimed done again (not left unchecked)", async () => {
+    const id = await skTurn(skProject("sk-requeue"), "Done. SKFAKE:slow", { run: false });
+    await waitFor(async () => (await skState(id))?.state === "running", 10000, "running");
+    await api("POST", "/api/turns", { sessionId: id, prompt: "[[say hi]]" });
+    await waitFor(async () => (await skState(id)).superseded === true, 10000, "superseded");
+    const before = skLog().length;
+    await api("POST", "/api/turns", { sessionId: id, prompt: "[[edit a.js]][[edit b.js]][[edit c.js]][[edit d.js]][[say Done. SKFAKE:pass]]" });
+    await waitFor(async () => (await skState(id))?.state === "pass", 20000, "re-review after supersede");
+    assert.ok(skLog().length > before, "the cancelled review blocked a fresh review of the same work");
   });
 
   await check("per-session mode overrides the app default", async () => {
@@ -2623,6 +2669,10 @@ try {
     }
     const attachedAudit = await api("POST", "/api/turns", { cwd: dir, prompt: "[[say got the files]]", files: auditUploads, permissionMode: "default", skeptic: "off" });
     await idle(attachedAudit.json.sessionId);
+    const artAudit = await api("POST", "/api/turns", { cwd: dir, prompt: "[[write audit-page.html <title>Audit page</title><h1>one</h1>]][[write audit-plan.md # Audit plan\n\nSome **text**.]][[say made them]]", permissionMode: "default", skeptic: "off" });
+    await idle(artAudit.json.sessionId);
+    await api("POST", "/api/turns", { sessionId: artAudit.json.sessionId, prompt: "[[write audit-page.html <title>Audit page</title><h1>two</h1>]][[write audit-cube.obj " + OBJ_CUBE + "]][[say changed it]]" });
+    await idle(artAudit.json.sessionId);
     const askAudit = await api("POST", "/api/turns", { cwd: dir, prompt: "[[perm]]", permissionMode: "default", skeptic: "off" });
     await waitFor(async () => (await session(askAudit.json.sessionId)).running, 5000, "approval turn");
     const chromium = await loadChromium("audit");
@@ -2772,6 +2822,25 @@ try {
           await page.waitForSelector(".msg.user .msg-files .embed-card");
           await page.waitForSelector(".msg.user .msg-files .md-doc");
           await scan("sent attachments");
+          await page.goto(BASE + "/s/" + artAudit.json.sessionId, { waitUntil: "domcontentloaded" });
+          await page.waitForSelector(".artifact-card[data-v='2']");
+          await scan("artifact cards");
+          await page.locator(".artifact-card[data-v='2']").click();
+          await page.waitForSelector("#artifact:not([hidden]) iframe");
+          await scan("artifact panel");
+          await page.locator("#artifact .artifact-version").click();
+          await page.waitForSelector("#sheet:not([hidden]) .sheet-panel");
+          await scan("artifact versions");
+          await page.keyboard.press("Escape");
+          await page.locator("#artifact .artifact-close").click();
+          await page.locator(".artifact-card").filter({ hasText: "Audit plan" }).click();
+          await page.waitForSelector("#artifact .md-doc");
+          await scan("artifact markdown");
+          await page.locator("#artifact .artifact-close").click();
+          await page.locator(".artifact-card").filter({ hasText: "Audit cube" }).click();
+          await page.waitForSelector("#artifact .model-stage[data-model='ready']");
+          await scan("artifact 3d model");
+          await page.locator("#artifact .artifact-close").click();
           await page.locator("#files").setInputFiles([path.join(auditSrc, "notes.md"), path.join(auditSrc, "bundle.zip")]);
           await page.waitForFunction(() => document.querySelectorAll("#thumbs .filechip:not(.busy)").length === 2);
           await scan("composer attachments");
@@ -3313,8 +3382,8 @@ try {
 
   await check("links: a file anywhere under the home folder resolves (absolute, ~, relative, spaces, %-encoding), secrets never do, and one that appears later is found", async () => {
     await api("PATCH", "/api/skeptic/settings", { mode: "off" });
-    // 13 Oct 2026: "a linked note($HOME/Projects/other-project/NOTES.md)" from a session in
-    // $HOME/Projects/my-project showed "File moved or deleted": a sibling project, outside the working folder.
+    // 13 Oct 2026: "[Classic difficulty backlog]($HOME/Projects/sibling-project/NOTES.md)" from a session in
+    // $HOME/Projects/other-project showed "File moved or deleted": a sibling project, outside the working folder.
     const home = fs.mkdtempSync(path.join(os.homedir(), "gm-e2e-links-"));
     try {
       const cwd = path.join(home, "proj");
@@ -3330,7 +3399,7 @@ try {
       for (const secret of [path.join(notes, ".env"), path.join(notes, "server.pem"), path.join(notes, "id_ed25519.txt"), path.join(home, ".ssh", "note.md"), path.join(home, ".ssh", "config.txt")]) fs.writeFileSync(secret, "SECRET-DO-NOT-SHOW\n");
       const rel = path.relative(os.homedir(), path.join(notes, "tilde note.md"));
       const say = [
-        "a linked note(" + path.join(notes, "Classic difficulty backlog.md") + ")",
+        "[Classic difficulty backlog](" + path.join(notes, "Classic difficulty backlog.md") + ")",
         "[encoded](" + path.join(notes, "Classic%20difficulty%20backlog.md") + ")",
         "[tilde](~/" + rel + ")",
         "[relative](docs/rel note.md)",
@@ -4741,6 +4810,46 @@ try {
     }
   });
 
+  await check("send tap at 390: the first tap fires the request and shows the message at once, and the following click does not send twice", async () => {
+    const chromium = await loadChromium("send tap");
+    if (!chromium) return;
+    const dir = project("send-tap");
+    const first = await api("POST", "/api/turns", { cwd: dir, prompt: "[[say first reply]]", permissionMode: "default", skeptic: "off" });
+    assert.equal(first.status, 200, JSON.stringify(first.json));
+    const id = first.json.sessionId;
+    await idle(id);
+    const browser = await launchChromium(chromium);
+    try {
+      const page = await browser.newPage({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, hasTouch: true, isMobile: true });
+      await page.context().addCookies([{ name: "gm_session", value: cookie.split("=")[1], url: BASE, httpOnly: true, sameSite: "Strict" }]);
+      let turns = 0;
+      let requestedAt = 0;
+      // Hold the response back: a slow turn start must not leave the tapped message sitting in the composer.
+      await page.route("**/api/turns", async (route) => {
+        turns += 1;
+        requestedAt = Date.now();
+        await sleep(1200);
+        await route.continue();
+      });
+      await page.goto(BASE + "/s/" + id, { waitUntil: "domcontentloaded" });
+      await page.waitForSelector("#composer:not([hidden]) .composer-bar");
+      await page.locator("#input").fill("tap sends now [[say second reply]]");
+      const tappedAt = Date.now();
+      await page.locator("#send").tap();
+      await waitFor(async () => requestedAt && (await page.locator("#input").inputValue()) === "" && (await page.locator("#main .msg.user").last().innerText()).includes("tap sends now"), 900, "the first tap to fire the request, clear the composer and show the message while the response is held");
+      assert.ok(requestedAt - tappedAt < 600, "tap to request took " + (requestedAt - tappedAt) + "ms");
+      assert.equal(turns, 1, "one tap, one request");
+      await waitFor(() => prompts(id).some((l) => l.includes("tap sends now")), 12000, "the held request to reach Grok once it is released");
+      await waitFor(async () => (await page.locator("#main .msg.assistant").last().innerText()).includes("second reply"), 12000, "the real reply after the held response");
+      await idle(id);
+      assert.equal(turns, 1, "the click after the tap sent a second time");
+      assert.equal(prompts(id).filter((l) => l.includes("tap sends now")).length, 1, "Grok received the message once");
+      await page.close();
+    } finally {
+      await browser.close();
+    }
+  });
+
   await check("long run panel and composer row: Send now never covers a chip at 390 and 1440", async () => {
     const chromium = await loadChromium("longrun panel");
     if (!chromium) return;
@@ -4839,6 +4948,212 @@ try {
       await browser.close();
       await api("POST", "/api/sessions/" + id + "/longrun", { action: "stop" });
       await api("POST", "/api/sessions/" + id + "/cancel", {});
+    }
+  });
+  await check("artifacts: Grok's file writes become versioned cards, the panel renders them sandboxed, and versions switch", async () => {
+    await api("PATCH", "/api/skeptic/settings", { mode: "off" });
+    const dir = project("artifacts");
+    const page1 = "<!doctype html><title>Launch plan</title><h1>Launch v1</h1><p id=out>waiting</p><script>let p; try { p = parent.document.cookie, p = 'open'; } catch (e) { p = 'blocked'; } document.getElementById('out').textContent = 'ran ' + p;</script>";
+    const doc = "# Release notes\n\nThe **first** cut.\n\n| Area | State |\n| --- | --- |\n| API | done |\n";
+    const first = await api("POST", "/api/turns", { cwd: dir, prompt: "[[write launch.html " + page1 + "]][[write notes.md " + doc + "]][[edit src.js]][[say Made the page and the notes.]]", permissionMode: "bypassPermissions" });
+    const id = first.json.sessionId;
+    await idle(id);
+    await waitFor(async () => (await api("GET", "/api/sessions/" + id + "/artifacts")).json.artifacts.length === 2, 5000, "two artifacts");
+    let list = (await api("GET", "/api/sessions/" + id + "/artifacts")).json.artifacts;
+    assert.deepEqual(list.map((a) => [a.title, a.kind, a.versions.length]).sort(), [["Launch plan", "html", 1], ["Release notes", "markdown", 1]], "an edit to existing code is not an artifact");
+    const html = list.find((a) => a.kind === "html");
+    // HTML is served with a sandbox CSP, by id only; nothing else is reachable through the route.
+    const res = await fetch(BASE + "/api/sessions/" + id + "/artifacts/" + html.id + "/1", { headers: { Cookie: cookie } });
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get("content-security-policy"), /sandbox allow-scripts/);
+    assert.doesNotMatch(res.headers.get("content-security-policy"), /allow-same-origin/);
+    assert.equal((await fetch(BASE + "/api/sessions/" + id + "/artifacts/" + html.id + "/1")).status, 401, "needs the login like every file route");
+    assert.equal((await fetch(BASE + "/api/sessions/" + id + "/artifacts/" + html.id + "/7", { headers: { Cookie: cookie } })).status, 404);
+    assert.equal((await fetch(BASE + "/api/sessions/" + id + "/artifacts/..%2F..%2Findex.json/1", { headers: { Cookie: cookie } })).status, 404);
+    // A second turn edits the page: v2, same title, and the first turn keeps its v1 card.
+    const page2 = page1.replace("Launch v1", "Launch v2").replace("<title>Launch plan</title>", "<title>Other title</title>");
+    await api("POST", "/api/turns", { sessionId: id, prompt: "[[write launch.html " + page2 + "]][[say Updated the page.]]" });
+    await idle(id);
+    await waitFor(async () => (await api("GET", "/api/sessions/" + id + "/artifacts")).json.artifacts.some((a) => a.versions.length === 2), 5000, "v2");
+    list = (await api("GET", "/api/sessions/" + id + "/artifacts")).json.artifacts;
+    const page = list.find((a) => a.kind === "html");
+    assert.deepEqual(page.versions.map((v) => v.v), [1, 2]);
+    assert.equal(page.title, "Launch plan", "the title stays the same across versions");
+
+    const chromium = await loadChromium("artifacts");
+    if (!chromium) return;
+    const browser = await launchChromium(chromium);
+    const token = cookie.split("=")[1];
+    try {
+      for (const [width, height] of [[390, 844], [1440, 900]]) {
+        const tab = await browser.newPage({ viewport: { width, height }, deviceScaleFactor: 1 });
+        await tab.context().addCookies([{ name: "gm_session", value: token, url: BASE, httpOnly: true, sameSite: "Strict" }]);
+        await tab.goto(BASE + "/s/" + id, { waitUntil: "domcontentloaded" });
+        await tab.waitForSelector(".artifact-card[data-v='2']");
+        // Cards sit in the turn that made them: turn one has the page at v1 and the notes; turn two has the page at v2.
+        const cards = await tab.evaluate(() => [...document.querySelectorAll(".artifact-card")].map((c) => c.querySelector(".artifact-title").textContent + " v" + c.dataset.v + " after " + (() => {
+          let n = c.previousElementSibling;
+          while (n && !n.matches(".msg.user")) n = n.previousElementSibling;
+          return n ? n.textContent.slice(0, 12) : "";
+        })()));
+        assert.equal(cards.length, 3, cards.join(" | "));
+        assert.ok(cards[0].startsWith("Launch plan v1") && cards[2].startsWith("Launch plan v2"), cards.join(" | "));
+        assert.match(await tab.locator(".artifact-card[data-v='2'] .artifact-meta").innerText(), /HTML page · v2 · Updated/);
+        assert.deepEqual(await paintedOverlaps(tab), [], "cards overlap at " + width);
+        assert.equal(await tab.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
+        await tab.screenshot({ path: path.join(SHOTS, "artifact-cards-" + width + ".png") });
+        // Open v2: the page runs in a sandboxed frame that cannot reach Grok Deck.
+        await tab.locator(".artifact-card[data-v='2']").click();
+        await tab.waitForSelector("#artifact:not([hidden]) iframe.artifact-frame");
+        assert.equal(await tab.locator("#artifact iframe").getAttribute("sandbox"), "allow-scripts allow-popups allow-modals");
+        const frame = () => tab.frames().find((f) => f.url().includes("/artifacts/" + page.id + "/"));
+        await waitFor(async () => /ran blocked/.test(await frame()?.locator("#out").innerText().catch(() => "")), 8000, "sandboxed script");
+        assert.match(await frame().locator("h1").innerText(), /Launch v2/);
+        assert.equal(await tab.locator("#artifact .artifact-version").innerText(), "v2 of 2");
+        assert.equal(await tab.locator("#artifact .artifact-heading").innerText(), "Launch plan");
+        assert.deepEqual(await paintedOverlaps(tab), [], "panel overlaps at " + width);
+        if (width >= 1024) {
+          // Desktop: a column beside the chat, in flow; the chat and composer stay usable.
+          const box = await tab.evaluate(() => {
+            const a = document.getElementById("artifact").getBoundingClientRect();
+            const m = document.getElementById("app").getBoundingClientRect();
+            return { panelLeft: a.left, appRight: m.right, pos: getComputedStyle(document.getElementById("artifact")).position, input: document.getElementById("input").getBoundingClientRect().width };
+          });
+          assert.equal(box.pos, "relative");
+          assert.ok(box.appRight <= box.panelLeft + 1, JSON.stringify(box));
+          assert.ok(box.input > 200, JSON.stringify(box));
+        } else {
+          const r = await tab.evaluate(() => document.getElementById("artifact").getBoundingClientRect().toJSON());
+          assert.ok(r.left === 0 && r.width === 390 && r.height === 844, JSON.stringify(r));
+        }
+        await tab.screenshot({ path: path.join(SHOTS, "artifact-panel-html-v2-" + width + ".png") });
+        // Switch to v1 from the version menu.
+        await tab.locator("#artifact .artifact-version").click();
+        await tab.waitForSelector("#sheet:not([hidden]) .sheet-item[aria-checked='true']");
+        assert.equal(await tab.locator("#sheet .sheet-item[aria-checked='true'] .sheet-label").first().evaluate((el) => el.firstChild.textContent), "Version 2");
+        await tab.screenshot({ path: path.join(SHOTS, "artifact-versions-" + width + ".png") });
+        await tab.locator("#sheet .sheet-item").filter({ hasText: "Version 1" }).click();
+        await waitFor(async () => /Launch v1/.test(await frame()?.locator("h1").innerText().catch(() => "")), 8000, "v1 in the frame");
+        assert.equal(await tab.locator("#artifact .artifact-version").innerText(), "v1 of 2");
+        // Code view highlights the source of the chosen version.
+        await tab.locator("#artifact .embed-seg-btn", { hasText: "Code" }).click();
+        await tab.waitForSelector("#artifact .embed-code");
+        assert.match(await tab.locator("#artifact .embed-code").innerText(), /Launch v1/);
+        await tab.screenshot({ path: path.join(SHOTS, "artifact-panel-code-v1-" + width + ".png") });
+        // The notes render through the chat's own markdown renderer, from the card in turn one.
+        await tab.locator("#artifact .artifact-close").click();
+        await tab.waitForSelector("#artifact", { state: "hidden" });
+        await tab.locator(".artifact-card").filter({ hasText: "Release notes" }).click();
+        await tab.waitForSelector("#artifact .md-doc table");
+        assert.match(await tab.locator("#artifact .md-doc strong").innerText(), /first/);
+        assert.equal(await tab.locator("#artifact .artifact-version").isDisabled(), true, "one version: nothing to switch");
+        assert.deepEqual(await paintedOverlaps(tab), [], "markdown panel overlaps at " + width);
+        await tab.screenshot({ path: path.join(SHOTS, "artifact-panel-markdown-" + width + ".png") });
+        // + > Artifacts lists them all.
+        await tab.keyboard.press("Escape");
+        await tab.waitForSelector("#artifact", { state: "hidden" });
+        await tab.locator("#attach").click();
+        await tab.locator("#sheet .sheet-item").filter({ hasText: "Artifacts" }).click();
+        await tab.waitForSelector("#sheet .sheet-item:has-text('Launch plan')");
+        await tab.locator("#sheet .sheet-item").filter({ hasText: "Launch plan" }).click();
+        await tab.waitForSelector("#artifact:not([hidden]) iframe.artifact-frame");
+        assert.equal(await tab.locator("#artifact .artifact-version").innerText(), "v2 of 2", "the list opens the newest version");
+        await tab.close();
+      }
+    } finally {
+      await browser.close();
+    }
+    // Deleting the session moves its artifacts to the trash with it.
+    await api("DELETE", "/api/sessions/" + id);
+    assert.deepEqual((await api("GET", "/api/sessions/" + id + "/artifacts")).json.artifacts, []);
+    assert.ok(fs.readdirSync(path.join(DATA, "trash")).some((name) => name.startsWith(id + "-artifacts-")));
+  });
+  await check("3D artifacts: a model a script writes becomes a versioned card, and the panel draws, turns and switches it", async () => {
+    await api("PATCH", "/api/skeptic/settings", { mode: "off" });
+    const dir = project("models");
+    // The script Grok would write and run: it writes bracket.glb with an upright of the given height.
+    fs.writeFileSync(path.join(dir, "gen.mjs"), "import fs from 'node:fs';\nimport { bracket } from " + JSON.stringify(path.join(here, "glb.js")) + ";\nfs.writeFileSync('bracket.glb', bracket(Number(process.argv[2])));\nconsole.log('wrote bracket.glb');\n");
+    const external = JSON.stringify({ asset: { version: "2.0" }, buffers: [{ uri: "part.bin", byteLength: 4 }] });
+    const first = await api("POST", "/api/turns", { cwd: dir, prompt: "[[shell node gen.mjs 0.06]][[write part.gltf " + external + "]][[say Made the bracket.]]", permissionMode: "bypassPermissions" });
+    const id = first.json.sessionId;
+    await idle(id);
+    await waitFor(async () => (await api("GET", "/api/sessions/" + id + "/artifacts")).json.artifacts.length === 2, 5000, "two models");
+    let list = (await api("GET", "/api/sessions/" + id + "/artifacts")).json.artifacts;
+    const model = list.find((a) => a.name === "bracket.glb");
+    assert.equal(model.kind, "model3d");
+    assert.equal(model.title, "Bracket");
+    assert.match(model.versions[0].calls[0], /^call-sh/, "tied to the shell call that ran the script");
+    assert.equal(list.find((a) => a.name === "part.gltf").kind, "model3d", "a glTF written through the write tool counts by its diff");
+    const res = await fetch(BASE + "/api/sessions/" + id + "/artifacts/" + model.id + "/1", { headers: { Cookie: cookie } });
+    assert.equal(res.headers.get("content-type"), "model/gltf-binary");
+    const { bracket } = await import("./glb.js");
+    assert.ok(Buffer.from(await res.arrayBuffer()).equals(bracket(0.06)), "the binary model is stored byte for byte");
+    // Running the script again with a taller upright is v2; running it unchanged adds nothing.
+    await api("POST", "/api/turns", { sessionId: id, prompt: "[[shell node gen.mjs 0.09]][[say Made it taller.]]" });
+    await idle(id);
+    await api("POST", "/api/turns", { sessionId: id, prompt: "[[shell node gen.mjs 0.09]][[say Same again.]]" });
+    await idle(id);
+    list = (await api("GET", "/api/sessions/" + id + "/artifacts")).json.artifacts;
+    assert.deepEqual(list.find((a) => a.id === model.id).versions.map((v) => v.v), [1, 2]);
+
+    const chromium = await loadChromium("3d artifacts");
+    if (!chromium) return;
+    const browser = await launchChromium(chromium);
+    const token = cookie.split("=")[1];
+    const MODEL_CANVAS = "#artifact .model-canvas";
+    try {
+      for (const [width, height] of [[390, 844], [1440, 900]]) {
+        const tab = await browser.newPage({ viewport: { width, height }, deviceScaleFactor: 1 });
+        await tab.context().addCookies([{ name: "gm_session", value: token, url: BASE, httpOnly: true, sameSite: "Strict" }]);
+        await tab.goto(BASE + "/s/" + id, { waitUntil: "domcontentloaded" });
+        await tab.waitForSelector(".artifact-card[data-v='2']");
+        assert.match(await tab.locator(".artifact-card[data-v='2'] .artifact-meta").innerText(), /3D model · v2 · Updated/);
+        assert.deepEqual(await paintedOverlaps(tab), [], "cards overlap at " + width);
+        assert.equal(await tab.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
+        await tab.screenshot({ path: path.join(SHOTS, "artifact3d-cards-" + width + ".png") });
+        await tab.locator(".artifact-card[data-v='2']").click();
+        await tab.waitForSelector("#artifact .model-stage[data-model='ready']");
+        const stage = await tab.locator("#artifact .model-stage").boundingBox();
+        assert.ok(stage.width > 300 && stage.height > 240, JSON.stringify(stage));
+        const drawn = await tab.evaluate(canvasSignature, MODEL_CANVAS);
+        assert.ok(drawn.lit > 64 * 64 * 0.04, "the canvas is not blank: " + JSON.stringify(drawn));
+        assert.match(await tab.locator("#artifact .model-note").innerText(), /triangles/);
+        assert.equal(await tab.locator("#artifact .artifact-version").innerText(), "v2 of 2");
+        assert.equal(await tab.locator("#artifact .artifact-reset").isVisible(), true);
+        assert.equal(await tab.locator("#artifact .embed-btn[aria-label='Copy artifact source']").isVisible(), false, "a model has no source to copy");
+        assert.deepEqual(await paintedOverlaps(tab), [], "viewer overlaps at " + width);
+        const tall = await tab.locator("#artifact .model-stage").getAttribute("data-dims");
+        await tab.screenshot({ path: path.join(SHOTS, "artifact3d-viewer-v2-" + width + ".png") });
+        // A drag turns it: the picture changes; Reset view puts it back.
+        await tab.mouse.move(stage.x + stage.width / 2, stage.y + stage.height / 2);
+        await tab.mouse.down();
+        await tab.mouse.move(stage.x + stage.width / 2 + 140, stage.y + stage.height / 2 + 40, { steps: 8 });
+        await tab.mouse.up();
+        const turned = await tab.evaluate(canvasSignature, MODEL_CANVAS);
+        assert.notEqual(turned.hash, drawn.hash, "dragging rotates the model");
+        assert.ok(turned.lit > 64 * 64 * 0.04, "still in view after the drag");
+        await tab.screenshot({ path: path.join(SHOTS, "artifact3d-viewer-rotated-" + width + ".png") });
+        await tab.locator("#artifact .artifact-reset").click();
+        assert.equal((await tab.evaluate(canvasSignature, MODEL_CANVAS)).hash, drawn.hash, "Reset view returns to the framed view");
+        // Version 1 loads the shorter bracket.
+        await tab.locator("#artifact .artifact-version").click();
+        await tab.locator("#sheet .sheet-item").filter({ hasText: "Version 1" }).click();
+        await waitFor(async () => (await tab.locator("#artifact .model-stage[data-model='ready']").getAttribute("data-dims").catch(() => "")) !== tall, 8000, "v1 model");
+        const short = await tab.locator("#artifact .model-stage").getAttribute("data-dims");
+        assert.ok(Number(short.split("x")[1]) < Number(tall.split("x")[1]), short + " vs " + tall);
+        assert.equal(await tab.locator("#artifact .artifact-version").innerText(), "v1 of 2");
+        assert.equal((await tab.evaluate(() => document.querySelectorAll("#artifact canvas").length)), 1, "the old viewer is disposed");
+        await tab.screenshot({ path: path.join(SHOTS, "artifact3d-viewer-v1-" + width + ".png") });
+        // A glTF that points at files outside itself is not fetched; the panel says why.
+        await tab.locator("#artifact .artifact-close").click();
+        await tab.locator(".artifact-card").filter({ hasText: "Part" }).click();
+        await tab.waitForSelector("#artifact .model-note");
+        await waitFor(async () => /outside itself/.test(await tab.locator("#artifact .model-note").innerText()), 8000, "external note");
+        assert.equal(await tab.locator("#artifact canvas").count(), 0);
+        await tab.close();
+      }
+    } finally {
+      await browser.close();
     }
   });
 } finally {

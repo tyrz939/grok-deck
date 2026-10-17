@@ -8,6 +8,7 @@
 //             [[ask JSON]] (ask_user_question: {questions:[{question,options:[{label,description}],multiSelect}]})
 //             [[mv FROM TO]]  [[rm FILE]] (files in the working folder)
 //             [[quiettool MS]] (a tool call that stays silent for MS)  [[write PATH TEXT]]  [[commit MSG]]
+//             [[shell CMD]] (really runs CMD the way Grok's run_terminal_command reports it: kind execute, no diff)
 import { execSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -164,6 +165,17 @@ async function prompt(sid, text, turn) {
         code = error.status ?? 1;
       }
       notify("session/update", sid, { sessionUpdate: "tool_call_update", toolCallId: "t" + nextId++, status: "completed", rawOutput: { type: "Bash", command: arg, exit_code: code } });
+    } else if (kind === "shell") {
+      const id = "call-sh" + nextId++;
+      const meta = { "x.ai/tool": { version: 1, name: "run_terminal_command", kind: "execute", namespace: "grok_build", label: "Run Command", read_only: false } };
+      notify("session/update", sid, { sessionUpdate: "tool_call", toolCallId: id, title: "run_terminal_command", rawInput: { command: arg }, _meta: meta });
+      let out = "";
+      try {
+        out = execSync(arg, { cwd, encoding: "utf8" });
+      } catch (error) {
+        out = String(error.stdout || error.message);
+      }
+      notify("session/update", sid, { sessionUpdate: "tool_call_update", toolCallId: id, kind: "execute", status: "completed", content: [{ type: "content", content: { type: "text", text: out } }] });
     } else if (kind === "edit") {
       const id = "e" + nextId++;
       notify("session/update", sid, { sessionUpdate: "tool_call", toolCallId: id, title: "search_replace", _meta: { "x.ai/tool": { name: "search_replace" } }, rawInput: { file_path: path.join(cwd, arg) } });

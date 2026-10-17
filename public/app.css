@@ -1600,7 +1600,7 @@ body[data-view="chat"] .toolcard.asking .step.tool { border-color: var(--accent)
 body[data-view="chat"] #skeptic[data-state="pass"] { border-color: color-mix(in srgb, #9ece6a 55%, transparent); }
 body[data-view="chat"] #skeptic[data-state="issues"] { border-color: #e0af68; }
 body[data-view="chat"] #skeptic[data-state="error"] { border-color: #f7768e; }
-body[data-view="chat"] .status.proof.warn { color: var(--orange, var(--accent)); }
+body[data-view="chat"] .status.proof.warn { color: var(--warn-ink); }
 body[data-view="chat"] .steps > summary:hover,
 body[data-view="chat"] .toolcard summary:hover { background: var(--chat-code); }
 body[data-view="chat"] .composer-bar {
@@ -3411,3 +3411,124 @@ body[data-view="chat"] .steps-body > .msg.bubble.earlier-reply {
 #longbar .lr-text { min-width: 0; overflow-wrap: anywhere; color: var(--chat-fg); }
 #longbar code.lr-text { font-family: var(--font-mono); font-size: var(--text-code); }
 #longbar .lr-status { color: var(--chat-fg-dim); white-space: nowrap; }
+
+/* Artifacts: a card in the turn that made a file, and one panel for it. The card sits in flow. The panel is an
+   overlay on the phone (full screen, like #docview) and the fourth grid column on desktop, in flow beside the chat. */
+.artifact-card {
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr) 18px;
+  align-items: center;
+  gap: var(--space-3);
+  width: calc(100% - 2 * var(--space-4));
+  max-width: calc(100% - 2 * var(--space-4));
+  min-width: 0;
+  min-height: 64px;
+  margin: var(--space-2) var(--space-4);
+  padding: var(--space-3) var(--space-4) var(--space-3) var(--space-3);
+  border: 1px solid var(--chat-line);
+  border-radius: var(--radius-card);
+  background: var(--chat-card);
+  color: var(--chat-fg);
+  text-align: left;
+  font-size: var(--text-body);
+  font-weight: var(--weight-regular);
+  cursor: pointer;
+}
+.artifact-card:hover { border-color: var(--chat-fg-dim); }
+.artifact-glyph {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 40px;
+  height: 40px;
+  border-radius: var(--radius-tile);
+  background: var(--chat-code);
+  color: var(--chat-fg);
+}
+.artifact-glyph svg, .artifact-go svg { width: 18px; height: 18px; display: block; }
+.artifact-text { display: flex; flex-direction: column; gap: var(--space-1); min-width: 0; }
+.artifact-title { min-width: 0; font-size: var(--text-label); font-weight: var(--weight-strong); color: var(--chat-fg); overflow-wrap: anywhere; }
+.artifact-meta { min-width: 0; font-size: var(--text-caption); font-weight: var(--weight-regular); color: var(--chat-fg-dim); overflow-wrap: anywhere; }
+.artifact-go { display: inline-flex; color: var(--chat-fg-dim); }
+
+#artifact {
+  position: fixed;
+  inset: 0;
+  z-index: 24;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  background: var(--chat-bg);
+  color: var(--chat-fg);
+  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+}
+#artifact[hidden] { display: none; }
+.artifact-head {
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr) 44px;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-2) var(--space-2) var(--space-4);
+  border-bottom: 1px solid var(--chat-line);
+}
+.artifact-titles { display: flex; flex-direction: column; gap: var(--space-1); min-width: 0; }
+.artifact-heading { margin: 0; min-width: 0; font-size: var(--text-title); font-weight: var(--weight-strong); color: var(--chat-fg); overflow-wrap: anywhere; }
+.artifact-sub { min-width: 0; font-size: var(--text-caption); font-weight: var(--weight-regular); color: var(--chat-fg-dim); overflow-wrap: anywhere; }
+.artifact-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-2) var(--space-2) var(--space-4);
+  border-bottom: 1px solid var(--chat-line);
+}
+.artifact-version {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-height: 32px;
+  padding: 0 var(--space-3);
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: var(--chip-fill);
+  color: var(--chat-fg);
+  font-size: var(--text-caption);
+  font-weight: var(--weight-strong);
+  white-space: nowrap;
+}
+.artifact-version:disabled { opacity: 1; cursor: default; }
+.artifact-version svg { width: 18px; height: 18px; }
+.artifact-bar .embed-seg[hidden] { display: none; }
+.artifact-actions { display: flex; align-items: center; gap: var(--space-1); margin-left: auto; }
+.artifact-download { display: inline-flex; align-items: center; justify-content: center; color: var(--chat-fg); border-radius: var(--radius-pill); }
+.artifact-download svg { width: 18px; height: 18px; display: block; }
+.artifact-body { flex: 1; min-height: 0; min-width: 0; overflow: auto; overscroll-behavior: contain; padding: var(--space-4); }
+.artifact-body.is-frame { padding: 0; overflow: hidden; display: flex; }
+.artifact-body .embed-body { max-height: none; overflow: visible; }
+.artifact-frame { flex: 1; width: 100%; min-height: 0; border: 0; background: #fff; }
+.artifact-image { display: block; max-width: 100%; max-height: 100%; margin: auto; padding: var(--space-4); object-fit: contain; }
+.artifact-table .table-wrap { margin: 0; }
+.artifact-body.is-model { display: flex; flex-direction: column; gap: var(--space-3); overflow: hidden; }
+.model-stage { flex: 1; min-height: 240px; min-width: 0; overflow: hidden; border-radius: var(--radius-card); background: var(--chat-card); border: 1px solid var(--chat-line); }
+.model-canvas { display: block; width: 100%; height: 100%; touch-action: none; cursor: grab; }
+.model-canvas:active { cursor: grabbing; }
+.model-note { margin: 0; overflow-wrap: anywhere; }
+.artifact-actions .icon-btn[hidden] { display: none; }
+
+@media (min-width: 1024px) {
+  body:has(#side:not([hidden])):has(#artifact:not([hidden])) {
+    grid-template-columns: var(--sidebar-w) var(--side-handle) minmax(0, 1fr) var(--artifact-w);
+  }
+  body:has(#side:not([hidden])) #artifact:not([hidden]) {
+    position: relative;
+    inset: auto;
+    z-index: auto;
+    grid-column: 4;
+    grid-row: 1;
+    min-height: 0;
+    padding: 0;
+    border-left: 1px solid var(--chat-line);
+  }
+}
+:root { --artifact-w: clamp(360px, 42vw, 720px); }

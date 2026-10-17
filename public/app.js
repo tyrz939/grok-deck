@@ -1,5 +1,6 @@
 import { parseMedia, renderMarkdown } from "./markdown.js";
 import { docBody, hydrateEmbeds, sizeText } from "./embeds.js";
+import { artifactCard, createArtifactPanel } from "./artifacts.js";
 import { applyEvent } from "./reduce.js";
 import { copyText } from "./clipboard.js";
 import { composerAction, hasComposerContent } from "./composer.js";
@@ -85,6 +86,7 @@ const app = {
   imageRoute: "",
   queue: [],
   loops: [],
+  artifacts: [],
   appearance: "dark",
   appearanceRemote: false,
 };
@@ -1516,6 +1518,20 @@ function stepsLabel(items, folded) {
 function syncList(messages, prefix, keep, nested) {
   const top = [];
   const earlier = nested ? new Set() : supersededReplies(messages);
+  const cards = nested ? null : artifactsByTurn(messages);
+  let turnIndex = 0;
+  const flushCards = () => {
+    for (const { art, version } of cards?.get(turnIndex) || []) {
+      const key = "art:" + art.id + ":" + version.v + ":" + version.h;
+      let node = domExisting.get(key);
+      if (!node) {
+        node = artifactCard(embedUi, art, version, openArtifact);
+        node.dataset.mid = key;
+      }
+      keep.add(node);
+      top.push(node);
+    }
+  };
   let group = null;
   const closeGroup = () => {
     if (!group) return;
@@ -1534,6 +1550,11 @@ function syncList(messages, prefix, keep, nested) {
   };
   for (const message of messages) {
     const key = prefix + message.id;
+    if (cards && message.role === "user") {
+      closeGroup();
+      flushCards();
+      turnIndex += 1;
+    }
     let node = domExisting.get(key);
     if (message.role === "subagent") {
       if (!node) node = createSubagent(message, key);
@@ -1560,7 +1581,36 @@ function syncList(messages, prefix, keep, nested) {
     }
   }
   closeGroup();
+  flushCards();
   return top;
+}
+
+// Artifact cards by turn: a version goes to the turn (the messages after one user message) holding the tool call
+// that made it, a subagent's call included. Each turn shows each artifact once, at the newest version it made.
+function artifactsByTurn(messages) {
+  const byTurn = new Map();
+  if (!app.artifacts.length) return byTurn;
+  const callTurn = new Map();
+  let index = 0;
+  for (const message of messages) {
+    if (message.role === "user") index += 1;
+    else if (message.role === "tool" && message.tool?.id) callTurn.set(message.tool.id, index);
+    else if (message.role === "subagent") {
+      for (const inner of message.sub?.messages || []) if (inner.role === "tool" && inner.tool?.id) callTurn.set(inner.tool.id, index);
+    }
+  }
+  for (const art of app.artifacts) {
+    for (const version of art.versions) {
+      const turn = (version.calls || []).map((id) => callTurn.get(id)).find((n) => n !== undefined);
+      if (turn === undefined) continue;
+      const list = byTurn.get(turn) || [];
+      const at = list.findIndex((item) => item.art.id === art.id);
+      if (at < 0) list.push({ art, version });
+      else if (list[at].version.v < version.v) list[at] = { art, version };
+      byTurn.set(turn, list);
+    }
+  }
+  return byTurn;
 }
 
 function syncDom() {
@@ -2074,6 +2124,10 @@ function onStreamEvent(ev) {
     paintAutoSettings();
   }
   if (ev.type === "longrun") paintLongRun(ev.run);
+  if (ev.type === "artifact") {
+    noteArtifact(ev.artifact);
+    return;
+  }
   if (ev.type === "queue") {
     app.queue = ev.items || [];
     paintQueue();
@@ -2151,6 +2205,8 @@ async function reloadSettled() {
     paintLongRun(data.longRun);
     paintSkeptic(data.skeptic);
     app.stick = true;
+    await loadArtifacts(id);
+    if (app.sessionId !== id) return;
     setMessages(data.messages || []);
     setRunning(!!data.running);
     if (data.running) {
@@ -2831,6 +2887,10 @@ async function renderChat(token, id) {
     chatMeta.replaceChildren();
   }
   closeStream();
+  if (app.sessionId !== id) {
+    artifactPanel.hide();
+    app.artifacts = [];
+  }
   app.sessionId = id;
   setNotice("");
   composer.hidden = false;
@@ -2841,7 +2901,7 @@ async function renderChat(token, id) {
   main.append(loading);
   let data;
   try {
-    data = await api("/api/sessions/" + id);
+    [data] = await Promise.all([api("/api/sessions/" + id), loadArtifacts(id)]);
   } catch (error) {
     if (error.auth || token !== app.gen) return;
     loading.textContent = error.message;
@@ -2895,6 +2955,7 @@ async function renderRoute() {
     return;
   }
   const where = route();
+  if (where.name !== "chat") artifactPanel.hide();
   if (where.name === "new") return renderNew(token);
   if (where.name === "chat") return renderChat(token, where.id);
   return renderList(token);
@@ -2946,6 +3007,39 @@ async function sendPrompt(prompt, images, files) {
   await renderChat(++app.gen, result.sessionId);
 }
 
+// A send is accepted on the first tap, so the composer must not sit full while the server starts the turn
+// (a fresh Grok process can take a second, which read as "the tap only hid the keyboard"). Clear it and show
+// the message at once; the returned undo puts the draft back if the send fails, unless a newer draft has
+// already replaced it. Attachments are handed over, not revoked, so a failed send keeps them too.
+function clearComposerForSend() {
+  const held = { text: input.value, images: app.images, files: app.files };
+  input.value = "";
+  app.images = [];
+  app.files = [];
+  renderThumbs();
+  growInput();
+  paintSend();
+  return () => {
+    if (input.value) return;
+    input.value = held.text;
+    if (!app.images.length && !app.files.length) {
+      app.images = held.images;
+      app.files = held.files;
+      renderThumbs();
+    }
+    growInput();
+    paintSend();
+  };
+}
+
+function showSentMessage(prompt, images, files) {
+  if (route().name !== "chat" || !Array.isArray(app.streamState?.messages)) return () => {};
+  if (!prompt && !images.length && !files.length) return () => {};
+  const before = app.streamState.messages;
+  setMessages([...before, { id: "user:sending-" + Date.now(), role: "user", text: prompt, images, files }]);
+  return () => setMessages(before);
+}
+
 composer.addEventListener("submit", async (event) => {
   event.preventDefault();
   if (app.sending) return;
@@ -2971,15 +3065,14 @@ composer.addEventListener("submit", async (event) => {
     // Desktop Enter / requestSubmit: queue as Send next. The button itself does Stop / Send now.
     if (!prompt && !images.length && !files.length) return;
     app.sending = true;
+    const restoreComposer = clearComposerForSend();
     try {
       const body = { prompt, images, files, model: app.session?.model, effort: app.session?.effort, permissionMode: app.session?.permissionMode, ultra: !!app.session?.ultra };
       const saved = await api("/api/sessions/" + app.sessionId + "/queue", { method: "POST", body: JSON.stringify(body) });
       app.queue = saved.queue || [];
-      input.value = "";
-      clearImages();
-      growInput();
       paintQueue();
     } catch (error) {
+      restoreComposer();
       if (!error.auth) setNotice(error.message);
     } finally {
       app.sending = false;
@@ -2999,13 +3092,14 @@ composer.addEventListener("submit", async (event) => {
   sendBtn.disabled = true;
   const missing = document.getElementById("missing-dir");
   if (missing) missing.remove();
+  const hideSentMessage = showSentMessage(prompt, images, files);
+  const restoreComposer = clearComposerForSend();
   try {
     await sendPrompt(prompt, images, files);
-    input.value = "";
-    clearImages();
     app.imageRoute = "chat:" + (route().id || "");
-    growInput();
   } catch (error) {
+    hideSentMessage();
+    restoreComposer();
     if (!error.auth && where.name === "new" && /does not exist/i.test(error.message)) showMissingDir(app.draft.cwd.trim());
     else if (!error.auth) setNotice(error.message);
   } finally {
@@ -3301,6 +3395,8 @@ function gearPath() {
 }
 
 const ICON_PATHS = {
+  cube: ["M9 2.5 15 6v6l-6 3.5L3 12V6Z", "M3 6l6 3.5L15 6", "M9 9.5v6"],
+  reset: ["M3.5 9a5.5 5.5 0 1 0 1.6-3.9", "M3.5 2.8v3.4h3.4"],
   cog: [gearPath(), "M11.3 9a2.3 2.3 0 1 1-4.6 0 2.3 2.3 0 0 1 4.6 0Z"],
   trash: ["M3 5h12", "M7 5V3.5h4V5", "M4.5 5l.7 9.5h7.6l.7-9.5", "M7.5 8v4.5", "M10.5 8v4.5"],
   check: ["M4 9.5 7.5 13 14 5.5"],
@@ -3331,6 +3427,10 @@ const ICON_PATHS = {
   audio: ["M7.5 13V4.5l6-1.5V11.5", "M5.75 15a1.75 1.75 0 1 0 0-3.5 1.75 1.75 0 0 0 0 3.5Z", "M11.75 13.5a1.75 1.75 0 1 0 0-3.5 1.75 1.75 0 0 0 0 3.5Z"],
   expand: ["M10.5 3.5h4v4", "M14.5 3.5 10 8", "M7.5 14.5h-4v-4", "M3.5 14.5 8 10"],
   download: ["M9 3v8.5", "M5.5 8.5 9 12l3.5-3.5", "M3.5 14.5h11"],
+  page: ["M3 3.5h12v11H3Z", "M3 6.5h12", "M7 9.5 5.5 11 7 12.5", "M11 9.5l1.5 1.5-1.5 1.5"],
+  table: ["M3 3.5h12v11H3Z", "M3 7h12", "M3 10.75h12", "M7.5 7v7.5"],
+  copy: ["M6.5 6.5h8v8h-8Z", "M11.5 6.5v-3h-8v8h3"],
+  layers: ["M9 2.5l6.5 3.25L9 9 2.5 5.75Z", "M2.5 9 9 12.25 15.5 9", "M2.5 12.25 9 15.5l6.5-3.25"],
   sun: ["M9 12a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z", "M9 2v1.5M9 14.5V16M2 9h1.5M14.5 9H16M4.1 4.1l1 1M12.9 12.9l1 1M13.9 4.1l-1 1M5.1 12.9l-1 1"],
 };
 
@@ -3929,6 +4029,9 @@ async function menuItems() {
     { label: "Choose file", icon: "file", run: () => { closeSheet(); filePick.click(); } },
     { label: "Skills", icon: "sparkle", run: () => openSkills("", attachBtn) },
   ];
+  if (chat && app.artifacts.length) {
+    items.push({ label: "Artifacts", detail: app.artifacts.length + (app.artifacts.length === 1 ? " file" : " files"), icon: "layers", run: () => openArtifactList(attachBtn) });
+  }
   if (chat) {
     const waiting = main.querySelector(".toolcard.asking, .qcard.asking");
     if (waiting && app.running) items.unshift({ label: "Go to approval", icon: "approve", accent: true, run: () => { closeSheet(); waiting.scrollIntoView({ block: "center", behavior: "smooth" }); } });
@@ -4192,6 +4295,8 @@ document.addEventListener("keydown", (event) => {
   if (event.key !== "Escape") return;
   if (!confirmBox.hidden) closeConfirm();
   else if (!sheet.hidden) closeSheet();
+  else if (!setsheet.hidden) closeSettings();
+  else if (docview.hidden && artifactPanel.isOpen()) artifactPanel.hide();
   else closeSettings();
 });
 
@@ -4295,6 +4400,7 @@ async function sendNowFromComposer() {
   }
   app.sending = true;
   sendBtn.disabled = true;
+  const restoreComposer = clearComposerForSend();
   try {
     const body = {
       prompt,
@@ -4307,15 +4413,13 @@ async function sendNowFromComposer() {
     };
     const saved = await api("/api/sessions/" + app.sessionId + "/queue", { method: "POST", body: JSON.stringify(body) });
     app.queue = saved.queue || [];
-    input.value = "";
-    clearImages();
-    growInput();
     if (saved.id) {
       const now = await api("/api/sessions/" + app.sessionId + "/queue/" + saved.id + "/now", { method: "POST", body: "{}" });
       app.queue = now.queue || [];
     }
     paintQueue();
   } catch (error) {
+    restoreComposer();
     if (!error.auth) setNotice(error.message);
     paintSend();
   } finally {
@@ -4324,8 +4428,32 @@ async function sendNowFromComposer() {
   }
 }
 
-// Click: Stop or Send now while a turn runs. Idle Send and Send next (Enter) use form submit.
+// Send fires on pointerdown, not click. On a phone the click lands after the tap lifts and the keyboard
+// has started to close (and a layout shift can swallow it altogether), so a click-only send reads as
+// "the first tap hid the keyboard, then it sent a second later". Acting on the way down fires the request
+// on the first tap; preventDefault keeps the field focused, so the keyboard and layout stay put, and the
+// click that follows is swallowed below so nothing sends twice. Keyboard and programmatic clicks get no
+// pointerdown and still use the click/form-submit path. Running turns keep their Stop / Send now split.
+let sendTapAt = 0;
+sendBtn.addEventListener("pointerdown", (event) => {
+  if (sendBtn.disabled || app.sending) return;
+  if (event.pointerType === "mouse" && event.button !== 0) return;
+  event.preventDefault();
+  sendTapAt = Date.now();
+  if (!app.running || route().name !== "chat") {
+    composer.requestSubmit();
+    return;
+  }
+  if (!hasComposerContent(input.value, app.images.length + app.files.length)) stopTurn();
+  else sendNowFromComposer();
+});
+
 sendBtn.addEventListener("click", (event) => {
+  if (sendTapAt && Date.now() - sendTapAt < 1000) {
+    sendTapAt = 0;
+    event.preventDefault();
+    return;
+  }
   if (!app.running || route().name !== "chat") return;
   event.preventDefault();
   if (!hasComposerContent(input.value, app.images.length + app.files.length)) stopTurn();
@@ -4452,6 +4580,56 @@ function openDoc(spec) {
 }
 
 const embedUi = { icon: (name) => lineIcon(name), openDoc };
+
+// ---- Artifacts: the files Grok made in this session (lib/artifacts.js, public/artifacts.js) ----
+const artifactRoot = document.getElementById("artifact");
+const artifactPanel = createArtifactPanel({
+  icon: (name) => lineIcon(name),
+  copyText,
+  openSheet,
+  closeSheet,
+  sessionId: () => app.sessionId,
+  onToggle: (open) => {
+    document.body.classList.toggle("artifact-open", open);
+    if (!open) input.focus({ preventScroll: true });
+  },
+}, artifactRoot);
+
+async function loadArtifacts(id) {
+  try {
+    const data = await api("/api/sessions/" + id + "/artifacts");
+    if (app.sessionId !== id) return;
+    app.artifacts = data.artifacts || [];
+    artifactPanel.refresh(app.artifacts);
+  } catch {
+    // The chat still draws without its cards.
+  }
+}
+
+function noteArtifact(art) {
+  if (!art?.id) return;
+  const at = app.artifacts.findIndex((a) => a.id === art.id);
+  if (at < 0) app.artifacts.push(art);
+  else app.artifacts[at] = art;
+  artifactPanel.refresh(app.artifacts);
+  syncDom();
+}
+
+function openArtifact(art, v) {
+  const fresh = app.artifacts.find((a) => a.id === art.id) || art;
+  artifactPanel.show(fresh, v);
+}
+
+function openArtifactList(anchor) {
+  const items = [...app.artifacts].sort((a, b) => (b.updated || 0) - (a.updated || 0)).map((art) => ({
+    label: art.title,
+    detail: art.name + " · v" + art.versions[art.versions.length - 1].v,
+    icon: art.kind === "html" ? "page" : art.kind === "csv" ? "table" : art.kind === "svg" ? "photo" : art.kind === "code" ? "code" : "doc",
+    selected: artifactPanel.openId() === art.id,
+    run: () => { closeSheet(); openArtifact(art); },
+  }));
+  openSheet(items, anchor);
+}
 
 const closeDocBtn = docview.querySelector(".docview-close");
 closeDocBtn.append(lineIcon("x"));
@@ -4927,6 +5105,7 @@ function setLongOpen(open) {
 const LONG_LABELS = { running: "Running", paused: "Paused", done: "Done", blocked: "Blocked", budget: "Hit budget", stalled: "Stalled", stopped: "Stopped" };
 function longSub(lr) {
   const steering = lr.steering;
+  if (lr.status === "running" && lr.waitingOnUser) return "Waiting for your approval. The run resumes when you answer; nothing is auto-approved.";
   if (lr.status === "running" && steering?.state === "replying") return "Steering with your message. The run resumes after.";
   if (lr.status !== "running") return lr.note || "";
   if (steering?.state === "done" && steering.changed && Date.now() - steering.at < 10 * 60000) return "Resumed the goal. Changed: " + steering.changed;
@@ -4983,6 +5162,9 @@ function longBody(lr) {
       longRow("You said", steering.text, ""),
       longRow("Changed", steering.state === "replying" ? "" : steering.changed, steering.state === "replying" ? "Grok is replying, then resumes" : "Nothing named"),
     ));
+  }
+  if (lr.waitingOnUser) {
+    body.append(longGroup("Needs you", longRow("Approval", "Waiting for your answer below. The run is paused on this, not stalled, and resumes when you answer.", "")));
   }
   body.append(longGroup(
     "Progress",
@@ -5104,7 +5286,7 @@ function paintSkeptic(review) {
   if (review !== undefined) app.skeptic = review || null;
   const r = app.skeptic;
   if (!skepticBox) return;
-  if (!r || r.dismissed || (r.state === "skipped" && r.sent)) {
+  if (!r || r.dismissed || (r.state === "skipped" && r.sent) || (r.state === "cancelled" && r.superseded)) {
     skepticBox.hidden = true;
     skepticBox.replaceChildren();
     return;
