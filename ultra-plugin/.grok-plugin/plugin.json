@@ -1,6 +1,6 @@
 {
   "name": "grok-deck-ultra",
   "version": "1.0.0",
-  "description": "Plan, build and review subagents that Grok Deck's Ultra code mode routes pstack's poteto-mode work through.",
+  "description": "Plan, build and review subagents that Grok Deck's Deep mode routes pstack's poteto-mode work through.",
   "agents": "./agents/"
 }

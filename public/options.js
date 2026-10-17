@@ -1,7 +1,8 @@
 // Mode and reasoning for the composer toolbar. The visible reasoning chip is reasoningChipText.
-// Ultra is the existing tiered router (plan, build, review, unslop), based on pstack's poteto-mode.
+// Deep mode is the tiered router (plan, build, review, unslop), based on pstack's poteto-mode.
+// It is not a reasoning level. While it is on, the turn still runs at extra high.
 
-export const ULTRA_HELP = "Ultra forces extra high effort and the tiered Ultra router: plan, build, review, and unslop. Based on pstack's poteto-mode.";
+export const REVIEW_HELP = "Forces extra high effort and runs plan, build, review, and unslop. Based on pstack's poteto-mode.";
 
 const EFFORTS = ["low", "medium", "high", "xhigh"];
 const LONG_STATUSES = new Set(["running", "paused", "stalled", "blocked"]);
@@ -11,9 +12,9 @@ export function longRunActive(run) {
 }
 
 export function reasoningChoice({ effort, ultra } = {}) {
-  if (ultra) return { id: "ultra", label: "Ultra", effort: "xhigh", ultra: true };
-  const id = EFFORTS.includes(effort) ? effort : "high";
-  return { id, label: id, effort: id, ultra: false };
+  const stored = EFFORTS.includes(effort) ? effort : "high";
+  const id = ultra ? "xhigh" : stored;
+  return { id, label: id, effort: id, ultra: !!ultra };
 }
 
 const MODEL_CHIP = {
@@ -32,16 +33,25 @@ function modelChipName(model) {
   return raw.replace(/^grok-/i, "Grok ").replace(/-/g, " ").replace(/\b[a-z]/g, (ch) => ch.toUpperCase());
 }
 
-// Visible reasoning chip. Ultra stands alone. Otherwise the model and the effort.
-export function reasoningChipText(id, model) {
-  if (id === "ultra") return "Ultra";
-  return modelChipName(model) + " " + (EFFORT_CHIP[id] || "High");
+export function reasoningChipParts(id, model) {
+  return { model: modelChipName(model), effort: EFFORT_CHIP[id] || "High" };
 }
 
-export function applyReasoning(id) {
-  if (id === "ultra") return { effort: "xhigh", ultra: true };
-  if (EFFORTS.includes(id)) return { effort: id, ultra: false };
-  return { effort: "high", ultra: false };
+// Visible reasoning chip. Deep mode does not replace this label.
+export function reasoningChipText(id, model) {
+  const parts = reasoningChipParts(id, model);
+  return parts.model + " " + parts.effort;
+}
+
+// Picking an effort below extra high turns Deep mode off. Extra high keeps it.
+export function applyReasoning(id, { review = false } = {}) {
+  if (!EFFORTS.includes(id)) return { effort: "high", ultra: false };
+  return { effort: id, ultra: id === "xhigh" && !!review };
+}
+
+// Deep mode forces extra high. Turning it off leaves the effort where it is.
+export function applyReview(on) {
+  return on ? { effort: "xhigh", ultra: true } : { ultra: false };
 }
 
 // Long run wins, then Plan, then an active loop, otherwise Normal.

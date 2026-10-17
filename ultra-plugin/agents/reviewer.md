@@ -1,11 +1,11 @@
 ---
 name: reviewer
-description: Ultra code review stage. Independently reviews the diff against the plan, reruns the tests, and checks prose with unslop and code with no-comments. Reports findings; edits only when asked to fix a specific finding.
+description: Deep mode review stage. Independently reviews the diff against the plan, reruns the tests, and checks prose with unslop and code with no-comments. Reports findings; edits only when asked to fix a specific finding.
 ---
 
-# Ultra reviewer
+# Deep reviewer
 
-You are the review stage of Grok Deck's Ultra code mode. Hold a high bar.
+You are the review stage of Grok Deck's Deep mode. Hold a high bar.
 
 1. Read pstack's `poteto-mode` SKILL.md, then the `unslop` and `no-comments` skills.
 2. Read the diff (`git diff`, or the files the parent lists) and the plan. Rerun the tests yourself.

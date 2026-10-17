@@ -24,7 +24,7 @@ import { createLoop, deleteLoop, isLoopTurn, loopsFor, parseLoopCommand, startLo
 import { flushRunning, setShuttingDown as stopRecovery, startRecovery } from "./lib/recover.js";
 import { cleanThemeId, listThemes } from "./lib/theme.js";
 import { cancelAll as cancelSkeptics, cancelReview, dismiss as dismissReview, getSettings as skepticSettings, reviewCount, loadSettings as loadSkepticSettings, reviewFor, usageFor as skepticUsage, sendIssues, setSettings as setSkepticSettings, startReview, startSkeptic, sweepStrayReviewSessions, userSent as skepticUserSent } from "./lib/skeptic.js";
-import { LONG_RULES, beginLongRun, flushRuns, isLongRun, loadRuns, longRunFor, setShuttingDown, startSupervisor, stopLongRun } from "./lib/longrun.js";
+import { LONG_RULES, beginLongRun, flushRuns, isLongRun, loadRuns, longRunFor, setShuttingDown, startSupervisor, steerOptions, stopLongRun } from "./lib/longrun.js";
 import { bindAddresses, clientIp, hostAllowedName, isAllowedIp, lanAddresses, lanHostAllowed } from "./lib/net.js";
 import { getDataDir, getPort, publicDir } from "./lib/paths.js";
 import { activeMap, isBusy, answerPermission, lastEventId, cancelSubagent, cancelTurn, getTurn, startTurn, stopAll, turnEvents, viewTurn, forgetTurn, answerPlan, answerQuestion, watchPayload } from "./lib/runner.js";
@@ -907,6 +907,8 @@ async function handleApi(req, res, url) {
     }
     const title = body.title ? cleanTitle(body.title) : "";
     if (sessionId) skepticUserSent(sessionId);
+    // While a long run is going, a typed message is a steering turn under the run's rules and approval mode.
+    const steer = sessionId && isLongRun(sessionId) && !isBusy(sessionId) ? steerOptions(sessionId, body.prompt) : null;
     const result = await startTurn({
       sessionId,
       cwd: body.cwd,
@@ -915,7 +917,7 @@ async function handleApi(req, res, url) {
       files: body.files,
       model: body.model,
       effort: body.effort,
-      permissionMode: body.permissionMode,
+      permissionMode: steer ? steer.permissionMode : body.permissionMode,
       ultra: body.ultra,
       plan: body.plan,
       title,

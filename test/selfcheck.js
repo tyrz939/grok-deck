@@ -10,7 +10,7 @@ import { contrastText, cssColor, neutralThemeColor, neutralVars, parseColors, pr
 import { applyEvent, extractImages, plainText } from "../public/reduce.js";
 import { copyText } from "../public/clipboard.js";
 import { composerAction, hasComposerContent } from "../public/composer.js";
-import { applyReasoning, longRunActive, modeChoice, reasoningChoice, reasoningChipText, ULTRA_HELP } from "../public/options.js";
+import { applyReasoning, applyReview, longRunActive, modeChoice, reasoningChoice, reasoningChipText, REVIEW_HELP } from "../public/options.js";
 import { findRefs, parseMedia, renderMarkdown, rewriteRefs } from "../public/markdown.js";
 import { accountBody, createBillingCache, parseBilling, planUsageLabel } from "../lib/billing.js";
 import { lastMessageSnippet } from "../lib/sessions.js";
@@ -270,7 +270,7 @@ test("tracks subagents, nested steps and their approvals", async () => {
 
 import { buildPacket, claimsDone, extractVerdict, issuesPrompt, normalizeVerdict, riskSignals, shouldReview } from "../lib/skeptic.js";
 import { isCheckCommand, newProof, proofSummary, proofVerdict, trackProof } from "../lib/evidence.js";
-import { longrunKeyword, ranClean } from "../lib/longrun.js";
+import { LONG_RULES, longrunKeyword, parseGoal, parseProgress, ranClean } from "../lib/longrun.js";
 import { reviewerArgs } from "../lib/skeptic.js";
 import { canOpenWake, noteSubagentTokens, watchPayload } from "../lib/runner.js";
 import { clearCookie } from "../lib/auth.js";
@@ -646,14 +646,16 @@ test("composer action slot: Send / Stop / Send now swap (images count as content
   assert.equal(hasComposerContent("", 2), true);
 });
 
-test("composer toolbar: mode priority and Ultra reasoning", () => {
+test("composer toolbar: mode priority and deep mode", () => {
   assert.deepEqual(reasoningChoice({ effort: "high", ultra: false }), { id: "high", label: "high", effort: "high", ultra: false });
-  assert.deepEqual(reasoningChoice({ effort: "low", ultra: true }), { id: "ultra", label: "Ultra", effort: "xhigh", ultra: true });
+  assert.deepEqual(reasoningChoice({ effort: "low", ultra: true }), { id: "xhigh", label: "xhigh", effort: "xhigh", ultra: true });
   assert.deepEqual(reasoningChoice({}), { id: "high", label: "high", effort: "high", ultra: false });
   assert.deepEqual(reasoningChoice({ effort: "nope" }), { id: "high", label: "high", effort: "high", ultra: false });
-  assert.deepEqual(applyReasoning("ultra"), { effort: "xhigh", ultra: true });
+  assert.deepEqual(applyReview(true), { effort: "xhigh", ultra: true });
+  assert.deepEqual(applyReview(false), { ultra: false });
+  assert.deepEqual(applyReasoning("xhigh", { review: true }), { effort: "xhigh", ultra: true });
   assert.deepEqual(applyReasoning("xhigh"), { effort: "xhigh", ultra: false });
-  assert.deepEqual(applyReasoning("low"), { effort: "low", ultra: false });
+  assert.deepEqual(applyReasoning("low", { review: true }), { effort: "low", ultra: false });
   assert.deepEqual(applyReasoning("medium"), { effort: "medium", ultra: false });
   assert.deepEqual(applyReasoning("nope"), { effort: "high", ultra: false });
   assert.equal(longRunActive({ status: "running" }), true);
@@ -668,11 +670,12 @@ test("composer toolbar: mode priority and Ultra reasoning", () => {
   assert.deepEqual(modeChoice({ longRun: { status: "stopped" }, loops: [{ status: "paused" }] }), { id: "normal", label: "Normal" });
   assert.deepEqual(modeChoice({ loops: [{ status: "active" }] }), { id: "loops", label: "Loops" });
   assert.deepEqual(modeChoice({ longRun: true, plan: true }), { id: "long", label: "Long run" });
-  assert.match(ULTRA_HELP, /pstack's poteto-mode/);
-  assert.match(ULTRA_HELP, /plan, build, review, and unslop/);
-  assert.equal(ULTRA_HELP.includes("\u2014"), false);
+  assert.match(REVIEW_HELP, /pstack's poteto-mode/);
+  assert.match(REVIEW_HELP, /plan, build, review, and unslop/);
+  assert.match(REVIEW_HELP, /Forces extra high effort/);
+  assert.equal(REVIEW_HELP.includes("\u2014"), false);
   assert.equal(reasoningChipText("high", "grok-4.7"), "Grok 4.7 High");
-  assert.equal(reasoningChipText("ultra", "grok-4.7"), "Ultra");
+  assert.equal(reasoningChipText("xhigh", "grok-4.7"), "Grok 4.7 Extra high");
   assert.equal(reasoningChipText("xhigh", "grok-4.7-build-fast"), "Grok 4.7 Fast Extra high");
   assert.equal(reasoningChipText("low", "grok-4.5"), "Grok 4.5 Low");
   assert.equal(reasoningChipText("medium", "grok-4.6"), "Grok 4.6 Medium");
@@ -1183,4 +1186,23 @@ test("the skill picker lists Grok's skills, never its built-in commands", () => 
   assert.deepEqual(list.map((s) => [s.name, s.source]), [["pstack:interrogate", "pstack"], ["tdd", "pstack"], ["user:interrogate", "user"]]);
   assert.equal(list[1].description, "Use only when the user asks for TDD.");
   assert.deepEqual(skillsFromCommands(null), []);
+});
+
+test("long run panel: GOAL.md checklist and checks, PROGRESS.md now / last / next", () => {
+  const goal = parseGoal("# Goal\nship it\n\n- [x] parser\n- [ ] panel\n- plain note\n\n## Checks\n- `npm test`\n- [ ] not a command\n- `npm run test:e2e`\n");
+  assert.deepEqual(goal.items, [{ text: "parser", done: true }, { text: "panel", done: false }]);
+  assert.deepEqual(goal.checks, ["npm test", "npm run test:e2e"]);
+  const progress = parseProgress("# Progress\n## Done\n- set up\n- parser tests\n## In progress\n- panel layout\n## Next\n1. e2e\n2. screenshots\n## Notes\n- ignore me\n");
+  assert.deepEqual(progress, { now: "panel layout", last: "parser tests", next: "e2e", doneCount: 2 });
+  assert.deepEqual(parseProgress(""), { now: "", last: "", next: "", doneCount: 0 });
+  assert.equal(parseProgress("## Next\n- [x] finished early\n- real next\n").next, "real next");
+});
+
+test("long run steering: PAUSE is a status word, and the rules keep approvals and name the change", () => {
+  assert.equal(longrunKeyword("ok\nSTEERING: dropped the docs item\nLONGRUN: PAUSE"), "PAUSE");
+  assert.equal(longrunKeyword("LONGRUN: PAUSE\nmore text"), "");
+  const rules = LONG_RULES.join("\n");
+  assert.match(rules, /approves nothing/);
+  assert.match(rules, /STEERING:/);
+  assert.match(rules, /Never push/);
 });

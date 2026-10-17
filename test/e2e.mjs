@@ -262,7 +262,7 @@ async function readStream(id, after, stopWhen, ms = 15000) {
 }
 
 const results = [];
-const SHOTS = path.join(process.env.HOME || "/home/user", "Projects/grok-deck/shots");
+const SHOTS = path.join(process.env.HOME || "", "Projects/grok-deck/shots");
 fs.mkdirSync(SHOTS, { recursive: true });
 
 async function loadChromium(label) {
@@ -623,6 +623,42 @@ try {
     const stopped = await api("POST", "/api/sessions/" + id + "/longrun", { action: "stop" });
     assert.equal(stopped.status, 200);
     assert.equal(runFile(id).status, "stopped");
+  });
+
+  await check("long run: Send now steers the run; it names what changed and the goal resumes", async () => {
+    const dir = project("steer", { git: true, goal: GOAL, turns: ["[[write b.txt 1]][[say LONGRUN: CONTINUE]]", "[[write c.txt 1]][[say LONGRUN: BLOCKED end of script]]"] });
+    const r = await api("POST", "/api/turns", { cwd: dir, prompt: "[[sleep 6000]][[write a.txt 1]][[say LONGRUN: CONTINUE]]", permissionMode: "bypassPermissions", longRun: { hours: 1 } });
+    const id = r.json.sessionId;
+    await sleep(500);
+    const q = await api("POST", "/api/sessions/" + id + "/queue", { prompt: "[[say got it\\nSTEERING: dropped the docs item\\nLONGRUN: CONTINUE]]" });
+    assert.equal(q.status, 200);
+    await api("POST", "/api/sessions/" + id + "/queue/" + q.json.id + "/now", {});
+    await waitFor(() => runFile(id).steering?.state === "done", 15000, "steering reply");
+    const run = runFile(id);
+    assert.equal(run.status, "running", "Send now paused the run: " + run.note);
+    assert.equal(run.steering.changed, "dropped the docs item");
+    assert.equal(run.steers, 1);
+    await waitFor(() => runFile(id).status === "blocked", 20000, "goal resumed to the end of the script");
+    const p = prompts(id);
+    const at = p.findIndex((l) => l.includes("dropped the docs item"));
+    assert.ok(at > 0 && p.slice(at + 1).some((l) => l.includes("Continue the long run")), "the goal did not resume after steering");
+  });
+
+  await check("long run: a steering message keeps Ask-mode approvals and can pause the run", async () => {
+    const dir = project("steer-ask", { git: true, goal: GOAL });
+    const r = await api("POST", "/api/turns", { cwd: dir, prompt: "[[sleep 2000]][[write a.txt 1]][[say LONGRUN: CONTINUE]]", permissionMode: "default", longRun: { hours: 1 } });
+    const id = r.json.sessionId;
+    await sleep(300);
+    // The message asks for always-approve; a steering turn runs under the run's own approval mode anyway.
+    const q = await api("POST", "/api/sessions/" + id + "/queue", { prompt: "[[perm]][[say ok\\nSTEERING: paused on request\\nLONGRUN: PAUSE]]", permissionMode: "bypassPermissions" });
+    assert.equal(q.status, 200);
+    await waitFor(() => prompts(id).some((l) => l.includes("paused on request")), 15000, "steering turn started");
+    const rows = await readStream(id, 0, (rs) => rs.some((row) => row.ev.type === "permission"), 15000);
+    const perm = rows.find((row) => row.ev.type === "permission");
+    assert.ok(perm, "the steering turn skipped the approval");
+    await api("POST", "/api/sessions/" + id + "/permission", { reqId: perm.ev.reqId, decision: "once" });
+    await waitFor(() => runFile(id).status === "paused", 15000, "paused at the user's request");
+    assert.match(runFile(id).note, /Paused at your request: paused on request/);
   });
 
   await check("no progress for 3 turns pauses the run; an uncommitted edit counts as progress", async () => {
@@ -1719,15 +1755,41 @@ try {
       await page.locator("#optbar [data-reasoning]").click();
       await page.waitForSelector("#sheet:not([hidden])");
       const reasonText = await page.locator("#sheet").innerText();
-      assert.match(reasonText, /pstack's poteto-mode/);
+      assert.doesNotMatch(reasonText, /poteto-mode|Deep/);
       const reasonNames = (await page.locator("#sheet .sheet-item").allTextContents()).map((text) => text.replace("  ✓", "").trim());
-      assert.deepEqual(reasonNames, ["Low", "Medium", "High", "Extra high", "Ultra"]);
-      await page.locator("#sheet .sheet-item").filter({ hasText: /^Ultra/ }).click();
-      await page.waitForFunction(() => document.querySelector("#optbar [data-reasoning]")?.textContent === "Ultra");
+      assert.deepEqual(reasonNames, ["Low", "Medium", "High", "Extra high"]);
+      assert.equal(await page.locator("#sheet .sheet-check").count(), 1);
+      if (process.env.DEEP_SHOTS) await page.screenshot({ path: path.join(process.env.DEEP_SHOTS, "390-reasoning-sheet.png") });
+      await page.keyboard.press("Escape");
+      await page.waitForSelector("#sheet", { state: "hidden" });
+      assert.equal(await page.locator("#optbar [data-review]").getAttribute("aria-pressed"), "false");
+      await page.evaluate(() => document.activeElement?.blur());
+      if (process.env.DEEP_SHOTS) await page.screenshot({ path: path.join(process.env.DEEP_SHOTS, "390-off.png") });
+      await page.locator("#optbar [data-review]").click();
+      await page.waitForFunction(() => document.querySelector("#optbar [data-reasoning]")?.textContent === "Grok 4.7 Extra high" && document.querySelector("#optbar [data-review]")?.textContent === "Deep" && document.querySelector("#optbar [data-review]").getAttribute("aria-pressed") === "true");
+      await sleep(400);
+      if (process.env.DEEP_SHOTS) await page.screenshot({ path: path.join(process.env.DEEP_SHOTS, "390-on.png") });
+      const longRow = await page.evaluate(() => {
+        const mode = document.querySelector("#optbar [data-mode]");
+        const was = mode.textContent;
+        mode.textContent = "Long run";
+        const tops = ["#attach", "#optbar .opt-cog", "#optbar [data-mode]", "#optbar [data-reasoning]", "#optbar [data-review]", "#send"].map((q) => Math.round(document.querySelector(q).getBoundingClientRect().top + document.querySelector(q).getBoundingClientRect().height / 2));
+        const wide = document.documentElement.scrollWidth > document.documentElement.clientWidth;
+        mode.textContent = was;
+        return { tops, wide };
+      });
+      assert.equal(new Set(longRow.tops).size, 1, JSON.stringify(longRow));
+      assert.equal(longRow.wide, false);
       const after = await session(id);
       assert.equal(after.session.effort, "xhigh");
       assert.equal(after.session.ultra, true);
       assert.equal(after.session.plan, true);
+      await page.locator("#optbar [data-review]").click();
+      await page.waitForFunction(() => document.querySelector("#optbar [data-review]").getAttribute("aria-pressed") === "false");
+      assert.equal((await session(id)).session.ultra, false);
+      await page.locator("#optbar [data-review]").click();
+      await page.waitForFunction(() => document.querySelector("#optbar [data-review]").getAttribute("aria-pressed") === "true");
+      assert.equal((await session(id)).session.ultra, true);
       await page.locator("#attach").click();
       await page.waitForSelector("#sheet:not([hidden])");
       const menu = await page.locator("#sheet .sheet-item").allTextContents();
@@ -1747,10 +1809,29 @@ try {
       assert.match(settingsText, /Light/);
       assert.match(settingsText, /model/i);
       assert.equal(/Plan mode/.test(settingsText), false, settingsText);
-      assert.equal(/Ultra code/.test(settingsText), false, settingsText);
+      assert.equal(/Ultra code|Review pass|Deep mode/.test(settingsText), false, settingsText);
       assert.equal(settingsText.includes("Archive"), false, settingsText);
+      if (process.env.DEEP_SHOTS) await page.screenshot({ path: path.join(process.env.DEEP_SHOTS, "390-cog-settings.png") });
       await page.locator("#setsheet .set-done").click();
       await page.waitForSelector("#setsheet", { state: "hidden" });
+      const phone = await page.evaluate(() => {
+        const wide = (el) => el.scrollWidth > el.clientWidth + 1;
+        const review = document.querySelector("#optbar [data-review]").getBoundingClientRect();
+        const reason = document.querySelector("#optbar [data-reasoning]").getBoundingClientRect();
+        const send = document.querySelector("#send").getBoundingClientRect();
+        return {
+          reason: document.querySelector("#optbar [data-reasoning]").textContent,
+          review: document.querySelector("#optbar [data-review]").textContent,
+          gap: Math.round(review.left - reason.right),
+          sendGap: Math.round(send.left - review.right),
+          wide: [document.documentElement, document.body, document.querySelector("#app"), document.querySelector("#main")].filter(wide).map((el) => el.id || el.tagName),
+        };
+      });
+      assert.equal(phone.reason, "Grok 4.7 Extra high", JSON.stringify(phone));
+      assert.equal(phone.review, "Deep", JSON.stringify(phone));
+      assert.ok(phone.gap >= -1, JSON.stringify(phone));
+      assert.ok(phone.sendGap >= -1, JSON.stringify(phone));
+      assert.deepEqual(phone.wide, [], JSON.stringify(phone));
       await sleep(300);
       await page.screenshot({ path: path.join(shotDir, "optbar-390.png") });
       await page.setViewportSize({ width: 1440, height: 900 });
@@ -1765,6 +1846,7 @@ try {
           top: getComputedStyle(document.querySelector("#top")).display,
           mode: document.querySelector("#optbar [data-mode]").textContent,
           reason: document.querySelector("#optbar [data-reasoning]").textContent,
+          review: document.querySelector("#optbar [data-review]")?.textContent || "",
           inside: opt.height > 20 && opt.top >= field.bottom - 1 && opt.bottom <= bar.bottom + 1,
           pos: getComputedStyle(document.querySelector("#optbar")).position,
           radius: parseFloat(getComputedStyle(barEl).borderTopLeftRadius),
@@ -1773,7 +1855,14 @@ try {
       });
       assert.equal(desk.top, "none");
       assert.equal(desk.mode, "Plan");
-      assert.equal(desk.reason, "Ultra");
+      assert.equal(desk.reason, "Grok 4.7 Extra high");
+      assert.equal(desk.review, "Deep");
+      if (process.env.DEEP_SHOTS) await page.screenshot({ path: path.join(process.env.DEEP_SHOTS, "1440-on.png") });
+      await page.locator("#optbar [data-review]").click();
+      await page.waitForFunction(() => document.querySelector("#optbar [data-review]").getAttribute("aria-pressed") === "false");
+      if (process.env.DEEP_SHOTS) await page.screenshot({ path: path.join(process.env.DEEP_SHOTS, "1440-off.png") });
+      await page.locator("#optbar [data-review]").click();
+      await page.waitForFunction(() => document.querySelector("#optbar [data-review]").getAttribute("aria-pressed") === "true");
       assert.equal(desk.inside, true, JSON.stringify(desk));
       assert.equal(desk.pos, "static");
       assert.ok(desk.radius >= 24, JSON.stringify(desk));
@@ -2284,7 +2373,7 @@ try {
             assert.equal(m.checked, want.checks, where);
             assert.equal(m.chrome, 0, "no Close row " + where);
             if (name === "Reasoning") {
-              assert.match(await page.locator("#sheet").innerText(), /pstack's poteto-mode/);
+              assert.doesNotMatch(await page.locator("#sheet").innerText(), /poteto-mode/);
               if (appearance === "dark") await page.screenshot({ path: path.join(SHOTS, width === 390 ? "menus-390.png" : "menus-1440.png") });
             }
             // Outside tap closes; Esc closes.
@@ -3224,7 +3313,7 @@ try {
 
   await check("links: a file anywhere under the home folder resolves (absolute, ~, relative, spaces, %-encoding), secrets never do, and one that appears later is found", async () => {
     await api("PATCH", "/api/skeptic/settings", { mode: "off" });
-    // 13 Oct 2026: "[Backlog]($HOME/Projects/other-project/NOTES.md)" from a session in
+    // 13 Oct 2026: "a linked note($HOME/Projects/other-project/NOTES.md)" from a session in
     // $HOME/Projects/my-project showed "File moved or deleted": a sibling project, outside the working folder.
     const home = fs.mkdtempSync(path.join(os.homedir(), "gm-e2e-links-"));
     try {
@@ -3234,14 +3323,14 @@ try {
       for (const d of [cwd, notes, other, path.join(cwd, "docs"), path.join(home, ".ssh")]) fs.mkdirSync(d, { recursive: true });
       fs.writeFileSync(path.join(cwd, "PROGRESS.md"), "# Progress\n");
       fs.writeFileSync(path.join(cwd, "fake-turns.json"), "[]");
-      fs.writeFileSync(path.join(notes, "Backlog.md"), "# Backlog\n\nThe backlog token is OWL-7731.\n");
+      fs.writeFileSync(path.join(notes, "Classic difficulty backlog.md"), "# Classic difficulty backlog\n\nThe backlog token is OWL-7731.\n");
       fs.writeFileSync(path.join(notes, "tilde note.md"), "# Tilde\n");
       fs.writeFileSync(path.join(cwd, "docs", "rel note.md"), "# Relative\n");
       fs.writeFileSync(path.join(other, "up.md"), "# Up\n");
       for (const secret of [path.join(notes, ".env"), path.join(notes, "server.pem"), path.join(notes, "id_ed25519.txt"), path.join(home, ".ssh", "note.md"), path.join(home, ".ssh", "config.txt")]) fs.writeFileSync(secret, "SECRET-DO-NOT-SHOW\n");
       const rel = path.relative(os.homedir(), path.join(notes, "tilde note.md"));
       const say = [
-        "[Backlog](" + path.join(notes, "Backlog.md") + ")",
+        "a linked note(" + path.join(notes, "Classic difficulty backlog.md") + ")",
         "[encoded](" + path.join(notes, "Classic%20difficulty%20backlog.md") + ")",
         "[tilde](~/" + rel + ")",
         "[relative](docs/rel note.md)",
@@ -3260,7 +3349,7 @@ try {
       await idle(id);
       const text = (await session(id)).messages.find((m) => m.role === "assistant").text;
       const stored = (label) => new RegExp("\\[" + label + "\\]\\(/api/media/[0-9a-f]{64}\\.md\\?n=[^)]+\\)").test(text);
-      for (const label of ["Backlog", "encoded", "tilde", "relative", "up"]) assert.ok(stored(label), label + " was copied into the store:\n" + text);
+      for (const label of ["Classic difficulty backlog", "encoded", "tilde", "relative", "up"]) assert.ok(stored(label), label + " was copied into the store:\n" + text);
       for (const label of ["dotenv", "cert", "key", "ssh", "ssh2", "elsewhere", "later"]) assert.ok(!stored(label) && !new RegExp("\\[" + label + "\\]\\(/api/media/").test(text), label + " was left as written");
       assert.ok(!fs.readdirSync(path.join(tmp, "data", "media")).some((f) => fs.readFileSync(path.join(tmp, "data", "media", f)).includes("SECRET-DO-NOT-SHOW")), "no secret reached the store");
       const chromium = await loadChromium("links");
@@ -3272,7 +3361,7 @@ try {
         await page.goto(BASE + "/s/" + id, { waitUntil: "domcontentloaded" });
         await page.waitForSelector(".msg.assistant .embed-doc");
         const names = await page.locator(".msg.assistant .embed-doc .embed-name").allTextContents();
-        assert.deepEqual(names.sort(), ["Backlog.md", "Backlog.md", "rel note.md", "tilde note.md", "up.md"]);
+        assert.deepEqual(names.sort(), ["Classic difficulty backlog.md", "Classic difficulty backlog.md", "rel note.md", "tilde note.md", "up.md"]);
         assert.equal(await page.locator(".msg.assistant .md-missing").count(), 7, "the refused ones and the one not written yet show the card");
         // The file the agent had not written yet appears: coming back to the page finds it, no reload.
         fs.writeFileSync(path.join(cwd, "after.md"), "# After\n\nWritten late.\n");
@@ -4649,6 +4738,107 @@ try {
       await page.close();
     } finally {
       await browser.close();
+    }
+  });
+
+  await check("long run panel and composer row: Send now never covers a chip at 390 and 1440", async () => {
+    const chromium = await loadChromium("longrun panel");
+    if (!chromium) return;
+    const goal = "# Goal\nship the panel\n\n- [x] parser\n- [ ] panel\n- [ ] screenshots\n\n## Checks\n- `test -f ok.txt`\n- `grep -q yes ok.txt`\n";
+    const dir = project("lr-panel", { git: true, goal, turns: ["[[sleep 60000]][[say LONGRUN: CONTINUE]]", "[[sleep 60000]][[say STEERING: docs dropped\\nLONGRUN: CONTINUE]]"] });
+    fs.writeFileSync(path.join(dir, "PROGRESS.md"), "# Progress\n## Done\n- parser and its tests\n## In progress\n- the panel layout at 390\n## Next\n- screenshots at 390 and 1440\n");
+    fs.writeFileSync(path.join(dir, "ok.txt"), "no\n");
+    const r = await api("POST", "/api/turns", { cwd: dir, prompt: "[[say claim\\nLONGRUN: DONE]]", permissionMode: "bypassPermissions", longRun: { hours: 12 } });
+    const id = r.json.sessionId;
+    await waitFor(() => runFile(id).checkResults?.["grep -q yes ok.txt"], 15000, "first verify");
+    await waitFor(async () => (await session(id)).running, 15000, "next goal turn");
+    const browser = await launchChromium(chromium);
+    const token = cookie.split("=")[1];
+    // Every control in the bottom row is inside the card, Send sits beside the chip strip (never on it),
+    // the row itself never overflows, and each chip can be scrolled to and hit at its centre.
+    const rowProblems = (page) => page.evaluate(() => {
+      const out = [];
+      const bar = document.querySelector(".composer-bar").getBoundingClientRect();
+      const row = document.querySelector(".composer-tools");
+      const strip = document.querySelector("#optbar");
+      const send = document.querySelector("#send");
+      if (row.scrollWidth > row.clientWidth + 1) out.push("row overflows by " + (row.scrollWidth - row.clientWidth));
+      if (document.documentElement.scrollWidth > window.innerWidth + 1) out.push("page scrolls sideways");
+      const s = send.getBoundingClientRect();
+      const o = strip.getBoundingClientRect();
+      if (s.left < o.right - 0.5) out.push("send starts inside the chip strip");
+      const hits = (el) => {
+        const r = el.getBoundingClientRect();
+        const top = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+        return !!top && (top === el || el.contains(top));
+      };
+      for (const [name, sel] of [["plus", "#attach"], ["cog", ".opt-cog"], ["mode", "[data-mode]"], ["reasoning", "[data-reasoning]"], ["deep", "[data-review]"], ["send", "#send"]]) {
+        const el = document.querySelector("#composer " + sel);
+        if (!el) {
+          out.push(name + " missing");
+          continue;
+        }
+        if (strip.contains(el)) {
+          const r = el.getBoundingClientRect();
+          const box = strip.getBoundingClientRect();
+          if (r.right > box.right) strip.scrollLeft += r.right - box.right + 1;
+          if (r.left < box.left) strip.scrollLeft -= box.left - r.left + 1;
+        }
+        const r = el.getBoundingClientRect();
+        if (r.left < bar.left - 1 || r.right > bar.right + 1) out.push(name + " leaves the card");
+        if (r.width < 24) out.push(name + " squashed to " + Math.round(r.width));
+        if (!hits(el)) out.push(name + " is covered");
+      }
+      strip.scrollLeft = 0;
+      return out;
+    });
+    try {
+      for (const [width, height] of [[390, 844], [1440, 900]]) {
+        const page = await browser.newPage({ viewport: { width, height }, deviceScaleFactor: 1 });
+        await page.context().addCookies([{ name: "gm_session", value: token, url: BASE, httpOnly: true, sameSite: "Strict" }]);
+        await page.goto(BASE + "/s/" + id, { waitUntil: "domcontentloaded" });
+        await page.waitForSelector("#longbar:not([hidden]) .lr-toggle");
+        await page.waitForSelector("#send.stop-mode");
+        assert.equal(await page.locator("#input").getAttribute("placeholder"), "Steer the long run");
+        assert.deepEqual(await paintedOverlaps(page), [], "closed panel overlaps at " + width);
+        await page.screenshot({ path: path.join(SHOTS, "longrun-panel-closed-" + width + ".png") });
+        await page.locator("#longbar .lr-toggle").click();
+        await page.waitForSelector("#longbar .lr-body");
+        const board = await page.locator("#longbar .lr-body").innerText();
+        for (const want of ["the panel layout at 390", "parser and its tests", "screenshots at 390 and 1440", "Pass", "Fail", "of 12h"]) assert.ok(board.includes(want), want + " missing from the panel: " + board);
+        assert.deepEqual(await paintedOverlaps(page), [], "open panel overlaps at " + width);
+        await page.screenshot({ path: path.join(SHOTS, "longrun-panel-open-" + width + ".png") });
+        await page.locator("#longbar .lr-toggle").click();
+        await page.locator("#input").fill("Skip the docs step and do the tests first");
+        await page.waitForSelector("#send.now-mode");
+        assert.equal(await page.locator("#send").innerText(), "Send now");
+        assert.deepEqual(await rowProblems(page), [], "Send now row at " + width);
+        // The longest labels: Long run mode, Extra high, Deep on.
+        await page.locator("#composer [data-review]").click();
+        await page.waitForSelector("#composer [data-review='on']");
+        assert.deepEqual(await rowProblems(page), [], "Send now row with Deep on at " + width);
+        assert.deepEqual(await paintedOverlaps(page), [], "Send now overlaps at " + width);
+        await page.screenshot({ path: path.join(SHOTS, "composer-sendnow-" + width + ".png") });
+        await page.locator("#composer [data-review]").click();
+        await page.waitForSelector("#composer [data-review='off']");
+        if (width === 390) {
+          await page.locator("#send").click();
+          await page.waitForSelector("#longbar[data-steering='on']", { timeout: 15000 });
+        } else {
+          await page.locator("#input").fill("");
+          await page.waitForSelector("#longbar[data-steering='on']");
+        }
+        assert.match(await page.locator("#longbar .lr-title").innerText(), /Steering/);
+        assert.match(await page.locator("#longbar .lr-sub").innerText(), /resumes/);
+        assert.equal(await page.locator("#longbar .lr-act").innerText(), "Stop run");
+        assert.deepEqual(await paintedOverlaps(page), [], "steering overlaps at " + width);
+        await page.screenshot({ path: path.join(SHOTS, "longrun-steering-" + width + ".png") });
+        await page.close();
+      }
+    } finally {
+      await browser.close();
+      await api("POST", "/api/sessions/" + id + "/longrun", { action: "stop" });
+      await api("POST", "/api/sessions/" + id + "/cancel", {});
     }
   });
 } finally {

@@ -1130,6 +1130,8 @@ kbd { padding: 1px 6px; border-radius: 4px; background: var(--bg); border: 1px s
   min-width: 0;
   min-height: 0;
 }
+/* The chips shrink and then scroll inside their own strip, so Send, Stop and Send now always keep
+   their full width beside them and nothing in the row can overlap, whatever the labels say. */
 #composer .optbar {
   display: flex;
   flex: 0 1 auto;
@@ -1139,7 +1141,16 @@ kbd { padding: 1px 6px; border-radius: 4px; background: var(--bg); border: 1px s
   width: auto;
   max-width: 100%;
   min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-x: contain;
+  scrollbar-width: none;
 }
+#composer .optbar::-webkit-scrollbar { display: none; }
+#composer .optbar[data-more~="end"] { mask-image: linear-gradient(to right, #000 calc(100% - var(--space-6)), transparent); }
+#composer .optbar[data-more~="start"] { mask-image: linear-gradient(to left, #000 calc(100% - var(--space-6)), transparent); }
+#composer .optbar[data-more~="start"][data-more~="end"] { mask-image: linear-gradient(to right, transparent, #000 var(--space-6), #000 calc(100% - var(--space-6)), transparent); }
+.composer-tools .actions { flex: none; }
 #composer .opt-cog,
 #composer .opt-chip {
   min-height: 32px;
@@ -1154,12 +1165,29 @@ kbd { padding: 1px 6px; border-radius: 4px; background: var(--bg); border: 1px s
   padding: 0 var(--space-3);
   white-space: nowrap;
 }
-#composer .opt-chip[data-mode] { flex: none; }
+#composer .opt-chip[data-mode],
+#composer .opt-chip[data-review] { flex: none; }
+#composer .opt-chip[data-review="on"],
+#composer .opt-chip[data-review="on"]:hover,
+#composer .opt-chip[data-review="on"]:focus-visible {
+  background: var(--accent);
+  color: var(--on-accent);
+}
 #composer .opt-chip[data-reasoning] {
   flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+/* On a phone, drop the model name and tighten the chips so the mode, effort, and Deep all fit. */
+@media (max-width: 520px) {
+  #composer .optbar { gap: var(--space-1); }
+  #composer .optbar .opt-model { display: none; }
+  #composer .optbar .opt-chip { padding-inline: var(--space-2); }
+  #composer .optbar .opt-chip[data-reasoning] {
+    flex: none;
+    overflow: visible;
+  }
 }
 #composer .opt-cog {
   width: 32px;
@@ -1196,12 +1224,6 @@ kbd { padding: 1px 6px; border-radius: 4px; background: var(--bg); border: 1px s
 .subcard[data-tier="strong"] { border-left: 3px solid #e0af68; }
 .subcard[data-tier="ultra"] { border-left: 3px solid #bb9af7; }
 
-#longbar { display: flex; align-items: center; gap: 8px; padding: 6px 10px; margin: 0 0 6px; border-radius: var(--radius-control); font-size: var(--text-caption); color: var(--muted); background: color-mix(in srgb, var(--accent, #7aa2f7) 12%, transparent); border: 1px solid color-mix(in srgb, var(--accent, #7aa2f7) 35%, transparent); }
-#longbar[hidden] { display: none; }
-#longbar span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-#longbar[data-status="running"] span::before { content: "● "; color: var(--accent, #7aa2f7); }
-#longbar[data-status="stalled"], #longbar[data-status="blocked"] { border-color: #f7768e; }
-#longbar button { flex: none; padding: 4px 10px; font-size: var(--text-caption); min-height: 30px; }
 .long-row { display: flex; gap: 10px; align-items: flex-end; }
 .long-row .switch { flex: 1; }
 .long-row .long-hours { width: 70px; }
@@ -1433,7 +1455,8 @@ html[data-appearance="light"] .composer-bar { --chip-fill: var(--chat-bg); }
   width: auto;
   min-width: 44px;
   height: 36px;
-  padding: 0 14px;
+  padding: 0 var(--space-3);
+  white-space: nowrap;
   font-size: var(--text-label);
   font-weight: var(--weight-strong);
 }
@@ -1577,8 +1600,6 @@ body[data-view="chat"] .toolcard.asking .step.tool { border-color: var(--accent)
 body[data-view="chat"] #skeptic[data-state="pass"] { border-color: color-mix(in srgb, #9ece6a 55%, transparent); }
 body[data-view="chat"] #skeptic[data-state="issues"] { border-color: #e0af68; }
 body[data-view="chat"] #skeptic[data-state="error"] { border-color: #f7768e; }
-body[data-view="chat"] #longbar[data-status="stalled"],
-body[data-view="chat"] #longbar[data-status="blocked"] { border-color: #f7768e; }
 body[data-view="chat"] .status.proof.warn { color: var(--orange, var(--accent)); }
 body[data-view="chat"] .steps > summary:hover,
 body[data-view="chat"] .toolcard summary:hover { background: var(--chat-code); }
@@ -2080,7 +2101,7 @@ label.field input[readonly] {
 }
 .cwd-row .browse { border-radius: var(--radius-pill); padding: 0 var(--space-4); }
 .sk-btn,
-#longbar button,
+#longbar .lr-act,
 button.mini {
   min-height: 32px;
   height: auto;
@@ -2092,12 +2113,6 @@ button.mini {
 #longbar,
 #skeptic,
 .plancard { border-radius: var(--radius-card); }
-#longbar {
-  gap: var(--space-2);
-  padding: var(--space-2) var(--space-3);
-  margin: 0 0 var(--space-2);
-  font-size: var(--text-caption);
-}
 #skeptic {
   margin: 0 0 var(--space-2);
   padding: var(--space-2) var(--space-3);
@@ -2184,7 +2199,7 @@ kbd,
 .cwd-row .browse,
 button.mini,
 .sk-btn,
-#longbar button,
+#longbar .lr-act,
 .sheet-form button,
 button {
   background: var(--chat-card);
@@ -3275,3 +3290,124 @@ body[data-view="chat"] .steps-body > .msg.bubble.earlier-reply {
 .q-actions { display: flex; gap: var(--space-2); }
 .q-actions button { flex: 1; min-height: 44px; }
 .q-actions button:disabled { opacity: 0.5; }
+
+/* Long run panel: a summary row that opens into the goal board. In flow above the composer card. */
+#longbar {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--chat-line);
+  background: var(--chat-card);
+  color: var(--chat-fg);
+  font-size: var(--text-caption);
+  font-weight: var(--weight-regular);
+}
+#longbar[hidden] { display: none; }
+#longbar[data-status="stalled"],
+#longbar[data-status="blocked"] { border-color: var(--danger-ink); }
+#longbar[data-steering="on"] { border-color: var(--accent); }
+#longbar .lr-top {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+#longbar .lr-toggle {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  min-height: 44px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--chat-fg);
+  text-align: left;
+  font-size: var(--text-caption);
+  font-weight: var(--weight-regular);
+}
+#longbar .lr-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--chat-fg-dim);
+}
+#longbar[data-status="running"] .lr-dot { background: var(--ok-ink); }
+#longbar[data-steering="on"] .lr-dot { background: var(--accent); }
+#longbar[data-status="stalled"] .lr-dot,
+#longbar[data-status="blocked"] .lr-dot { background: var(--danger-ink); }
+#longbar .lr-words {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-width: 0;
+}
+#longbar .lr-title {
+  font-size: var(--text-caption);
+  font-weight: var(--weight-strong);
+  color: var(--chat-fg);
+}
+#longbar .lr-sub,
+#longbar .lr-meta {
+  font-size: var(--text-caption);
+  font-weight: var(--weight-regular);
+  color: var(--chat-fg-dim);
+}
+#longbar .lr-sub {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+#longbar .lr-meta { flex: none; white-space: nowrap; }
+#longbar .lr-toggle .ico { flex: none; width: 18px; height: 18px; transition: transform 0.15s; }
+#longbar .lr-toggle[aria-expanded="true"] .ico { transform: rotate(180deg); }
+#longbar .lr-act { flex: none; }
+#longbar .lr-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  max-height: min(45dvh, 360px);
+  overflow-y: auto;
+  padding-bottom: var(--space-1);
+}
+#longbar .lr-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+#longbar .lr-head-label {
+  font-size: var(--text-caption);
+  font-weight: var(--weight-strong);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--chat-fg-dim);
+}
+#longbar .lr-row {
+  display: grid;
+  grid-template-columns: 76px minmax(0, 1fr);
+  gap: var(--space-2);
+  min-width: 0;
+}
+#longbar .lr-k { color: var(--chat-fg-dim); }
+#longbar .lr-v { min-width: 0; overflow-wrap: anywhere; color: var(--chat-fg); }
+#longbar .lr-v.lr-empty { color: var(--chat-fg-dim); }
+#longbar .lr-item {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  align-items: start;
+  gap: var(--space-2);
+  min-width: 0;
+}
+#longbar .lr-item .ico { width: 18px; height: 18px; color: var(--chat-fg-dim); }
+#longbar .lr-item[data-state="done"] .ico,
+#longbar .lr-item[data-state="pass"] .ico,
+#longbar .lr-item[data-state="pass"] .lr-status { color: var(--ok-ink); }
+#longbar .lr-item[data-state="fail"] .ico,
+#longbar .lr-item[data-state="fail"] .lr-status { color: var(--danger-ink); }
+#longbar .lr-text { min-width: 0; overflow-wrap: anywhere; color: var(--chat-fg); }
+#longbar code.lr-text { font-family: var(--font-mono); font-size: var(--text-code); }
+#longbar .lr-status { color: var(--chat-fg-dim); white-space: nowrap; }

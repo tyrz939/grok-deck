@@ -12,7 +12,8 @@ Node only: no npm dependencies and no build step.
 - Send now (interrupt) and Send next (persistent queue) while a turn is running.
 - Reliability: stall watchdog with auto-resume, crash and restart recovery, continue-until-done, and stale-state refresh.
 - Proof before done: a turn that edits code without a passing check after the last edit is flagged "Unverified".
-- Long-run mode: multi-hour autonomous runs gated on `GOAL.md` checks, with a no-progress pause.
+- Long-run mode: multi-hour autonomous runs gated on `GOAL.md` checks, with a no-progress pause, steering by normal message, and an expandable progress panel.
+- Deep mode: a standalone rigor toggle (planner, builder and reviewer) with pstack's poteto-mode router mandatory.
 - Optional skeptical review: a fresh, read-only Grok rechecks turns that claim done and returns an evidence-backed verdict.
 - `/loop` scheduler for recurring prompts.
 - Installable PWA with push notifications (iOS 16.4+ over HTTPS).
@@ -22,8 +23,9 @@ Node only: no npm dependencies and no build step.
 Requirements: Linux, Node 20+, the `grok` CLI logged in, and (recommended) Tailscale.
 
 ```bash
-git clone https://github.com/tyrz939/grok-deck ~/Projects/grok-deck
+git clone --recurse-submodules https://github.com/tyrz939/grok-deck ~/Projects/grok-deck
 cd ~/Projects/grok-deck
+git submodule update --init --recursive   # if you cloned without --recurse-submodules; needed so pstack loads
 npm test
 PORT=8787 npm start            # then open http://127.0.0.1:8787
 ```
@@ -80,24 +82,38 @@ On iPhone: open the tailnet HTTPS URL in Safari, log in, Share, Add to Home Scre
 
 ## Skills (pstack)
 
-Every session has the full [pstack](https://github.com/cursor/plugins/tree/main/pstack) skill set by Lauren Tan ([poteto](https://github.com/poteto)), MIT licensed, vendored as the submodule `vendor/cursor-plugins` (set `PSTACK_DIR` to use another checkout). Thanks to poteto for writing it.
+Every session has the full [pstack](https://github.com/cursor/plugins/tree/main/pstack) skill set by Lauren Tan ([poteto](https://github.com/poteto)), MIT licensed, vendored as the submodule `vendor/cursor-plugins` (set `PSTACK_DIR` to use another checkout). Thanks to poteto for writing it. 50 pstack skills are advertised in a session; 52 skill folders are vendored.
 
 - Loading is Grok's own: the server passes `--plugin-dir` to `grok agent stdio`, Grok lists each skill's name and one-line description in the model's context, and the model reads a full SKILL.md only when a task calls for it. Typing `/name` runs it.
 - pstack marks every skill `disable-model-invocation: true` (in Cursor, poteto-mode is the router you turn on). Grok honours that flag, so the model would never see them. `lib/skills.js` builds a mirror in `data/plugins/pstack-<hash>/`: each SKILL.md copied with that one line removed, every other file a symlink to the vendored copy. The vendored files are never edited. A changed pstack gets a new folder.
-- A short rule tells Grok pstack's own router reminder (apply /poteto-mode for a new task that needs rigor) and how to read Cursor-only steps. Ultra loads the same mirror plus `ultra-plugin`.
+- A short rule tells Grok pstack's own router reminder (apply /poteto-mode for a new task that needs rigor) and how to read Cursor-only steps. Deep mode loads the same mirror plus `ultra-plugin` (see Deep mode below).
 - In the composer, `/` at the start of the field (or + > Skills) lists every skill Grok advertised (`available_commands_update`, built-in commands left out), pstack first with its credit. A pick fills `/name `, which goes to Grok as typed.
+
+## Deep mode
+
+Deep mode is a standalone toggle chip in the composer bottom row, after the Reasoning chip: muted when off, accent fill when on, one tap to toggle for the session. It is not a reasoning level. When on, it forces Extra high (xhigh) effort, makes pstack's poteto-mode router mandatory, and delegates through the Deep mode planner, builder and reviewer subagents before finishing. pstack is by Lauren Tan (poteto), MIT licensed (see Skills above).
+
+## Long run
+
+Long run is the unsupervised goal mode. Give it a goal; it keeps `GOAL.md` (objective and `## Checks`) and `PROGRESS.md`, and continues until DONE is accepted, it reports BLOCKED, or a budget is hit (12 hours by default, and a token budget, 40M tokens by default).
+
+You can steer it while it runs: send a normal message and the loop pauses, takes the message as a steering turn, then resumes with the goal unless you tell it to stop. The long run bar above the composer expands into a panel with Progress (Now, Last done, Next from `PROGRESS.md`), the `GOAL.md` checklist, each check with Pass, Fail or Not run, and Budget (time, turns, tokens, last activity).
+
+![Long run panel on a phone](docs/screenshots/longrun-panel-390.png)
+
+![Long run panel on desktop](docs/screenshots/longrun-panel-1440.png)
 
 ## Limits
 
-- Approvals are always answered by this app (Grok never runs with --always-approve), so switching Always-approve, Auto approve or Ask takes effect immediately, even mid-turn.
-- One Grok process stays alive per session across turns (closed after 45 minutes idle, on delete, or when Ultra/long-run settings change), so follow-up turns start fast and keep Grok's in-memory state. Background shell tasks, monitors and background subagents keep running after the turn ends, and when one finishes Grok wakes itself; that wake shows up as a new turn in the app.
+- Approvals for app turns are always answered by this app (the app never passes --always-approve to Grok for a normal app turn), so switching Always-approve, Auto approve or Ask takes effect immediately, even mid-turn. Named exceptions outside app turns are `grok-escalate` and the skeptic reviewer, which run headless with the global Grok permission setting (see below).
+- One Grok process stays alive per session across turns (closed after 45 minutes idle, on delete, or when Deep mode/long-run settings change), so follow-up turns start fast and keep Grok's in-memory state. Background shell tasks, monitors and background subagents keep running after the turn ends, and when one finishes Grok wakes itself; that wake shows up as a new turn in the app.
 - Stop cannot roll back a file a tool already wrote.
 - One running turn per session. A second send returns an error until the first finishes. "Send next" messages are saved to `data/queue.json`, so they survive a restart.
 - A dropped connection replays the live turn from the last event id. Refreshing also reloads the transcript, then continues from the cursor, so messages are not appended twice. If this Node process restarts, the in-memory buffer is gone. The transcript on disk is what you get back. Grok itself keeps the session.
 - Very long transcripts keep the latest portion of `updates.jsonl` (about the last 6 MB).
 - Long runs: DONE is only accepted after GOAL.md `## Checks` pass. With approvals off (Always-approve or Auto approve all) the app runs them itself; under Ask it accepts DONE only if every check command ran in that turn and exited 0 (read from Grok's own tool results). A run pauses after 3 turns with no new commit, no change to tracked files and no PROGRESS.md change. The watchdog restarts a turn that has been silent for 25 minutes, but never while an approval is waiting or a tool call is still running (up to 3 hours). A service restart never pauses a run; the watchdog resumes it.
 - Escalation: `~/.grok/bin/grok-escalate <strong|ultra-planner|ultra-builder|ultra-reviewer> "task"` runs a real xhigh worker from the tier's agent file. It runs headless with your global Grok permission setting (`config.toml` has always-approve), so under Ask mode your approval of the `grok-escalate` command is the only prompt.
-- Skeptical review: a second `grok -p` in a fresh context (no `--resume`, no subagents, edit tools removed, `agents/skeptic.md`) rechecks a turn that claims done. It reruns the tests, tries edge cases, and returns a verdict. The card above the composer shows Pass or Issues (with evidence, unverified claims, tokens and cost), with "Send issues to Grok" and Dismiss. Findings with no evidence are demoted to "unverified". Off by default; set it in App settings (default for all sessions) or per session from the + menu or Session settings: Off, Auto (only when the turn changed files, claims done, and is risky or larger: more than 3 files or 80 lines, no passing check after the last edit, a risky path, or Ultra), or every turn that changed files. "Review this turn now" always works. Auto-loop (off by default) sends high and medium issues back by itself, up to N rounds (1 to 4), and stops on a repeat, the round limit, a message from you, or Stop. It never nags: one review per diff hash, Dismiss is sticky, a 5-minute cooldown, an hourly cap (default 6 reviews), a daily token budget per session, and three dismissed Issues cards turn Auto off for that session. In a long run it is a second DONE gate after GOAL.md `## Checks` pass: issues reject the DONE; after N rejections the run goes to Blocked for you; a reviewer failure never traps a run. It runs with the global always-approve setting (the same as `grok-escalate`), so the reviewer must not edit files: edit tools are removed, and the tree is compared before and after (a changed tree discards the verdict as tainted). The agent file is `agents/skeptic.md`.
+- Skeptical review: a second `grok -p` in a fresh context (no `--resume`, no subagents, edit tools removed, `agents/skeptic.md`) rechecks a turn that claims done. It reruns the tests, tries edge cases, and returns a verdict. The card above the composer shows Pass or Issues (with evidence, unverified claims, tokens and cost), with "Send issues to Grok" and Dismiss. Findings with no evidence are demoted to "unverified". Off by default; set it in App settings (default for all sessions) or per session from the + menu or Session settings: Off, Auto (only when the turn changed files, claims done, and is risky or larger: more than 3 files or 80 lines, no passing check after the last edit, a risky path, or Deep mode), or every turn that changed files. "Review this turn now" always works. Auto-loop (off by default) sends high and medium issues back by itself, up to N rounds (1 to 4), and stops on a repeat, the round limit, a message from you, or Stop. It never nags: one review per diff hash, Dismiss is sticky, a 5-minute cooldown, an hourly cap (default 6 reviews), a daily token budget per session, and three dismissed Issues cards turn Auto off for that session. In a long run it is a second DONE gate after GOAL.md `## Checks` pass: issues reject the DONE; after N rejections the run goes to Blocked for you; a reviewer failure never traps a run. It runs with the global always-approve setting (the same as `grok-escalate`), so the reviewer must not edit files: edit tools are removed, and the tree is compared before and after (a changed tree discards the verdict as tainted). The agent file is `agents/skeptic.md`.
 - One password, one user.
 - This app reads `~/.grok/sessions`. Rename updates that session's summary title fields. It does not change `~/.grok/config.toml`, other repos, or Omarchy settings.
 - No public tunnel. Do not put it behind ngrok, Cloudflare Tunnel, or a router forward.

@@ -1,4 +1,4 @@
-const CACHE = "grok-deck-v43";
+const CACHE = "grok-deck-v45";
 const SHELL = ["/", "/app.css", "/app.js", "/appearance.js", "/markdown.js", "/embeds.js", "/highlight.js", "/reduce.js", "/clipboard.js", "/composer.js", "/options.js", "/fonts/inter-latin.woff2", "/icon.svg", "/icon-192.png", "/icon-512.png", "/icon-512-maskable.png", "/apple-touch-icon.png"];
 
 self.addEventListener("install", (event) => {

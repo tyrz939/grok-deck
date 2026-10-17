@@ -3,7 +3,7 @@ import { docBody, hydrateEmbeds, sizeText } from "./embeds.js";
 import { applyEvent } from "./reduce.js";
 import { copyText } from "./clipboard.js";
 import { composerAction, hasComposerContent } from "./composer.js";
-import { applyReasoning, longRunActive, modeChoice, reasoningChoice, reasoningChipText, ULTRA_HELP } from "./options.js";
+import { applyReasoning, applyReview, longRunActive, modeChoice, reasoningChoice, reasoningChipParts, REVIEW_HELP } from "./options.js";
 
 const EFFORTS = [
   ["high", "High"],
@@ -1403,7 +1403,7 @@ function paintSubagent(node, message, keep) {
   const bits = [];
   const tier = subTier(sub.agentType, sub.name);
   node.dataset.tier = tier;
-  bits.push(tier === "ultra" ? "Ultra tier" : tier === "strong" ? "Strong tier" : "Default tier");
+  bits.push(tier === "ultra" ? "Deep tier" : tier === "strong" ? "Strong tier" : "Default tier");
   if (sub.agentType && sub.agentType !== "general-purpose") bits.push(sub.agentType.replace(/^grok-deck-ultra:/, ""));
   const tokens = tokensText(sub.tokens || sub.liveTokens);
   if (tokens) bits.push(tokens);
@@ -2297,9 +2297,9 @@ function prefsBlock(prefs, onChange, { cwdEditable, onlyDirectory = false }) {
   ultra.checked = !!prefs.ultra;
   const ultraText = document.createElement("span");
   const ultraName = document.createElement("b");
-  ultraName.textContent = "Ultra code";
+  ultraName.textContent = "Deep mode";
   const ultraHelp = document.createElement("small");
-  ultraHelp.textContent = ULTRA_HELP;
+  ultraHelp.textContent = REVIEW_HELP;
   ultraText.append(ultraName, ultraHelp);
   ultraWrap.append(ultra, ultraText);
   const planWrap = document.createElement("label");
@@ -3387,11 +3387,13 @@ function paintOptbar() {
   const mode = modeChoice(currentModeState());
   const state = currentReasoningState();
   const reason = reasoningChoice(state);
-  const reasonText = reasoningChipText(reason.id, state.model);
+  const reasonParts = reasoningChipParts(reason.id, state.model);
+  const reasonText = reasonParts.model + " " + reasonParts.effort;
   let cog = bar.querySelector(".opt-cog");
   let modeBtn = bar.querySelector("[data-mode]");
   let reasonBtn = bar.querySelector("[data-reasoning]");
-  if (!cog || !modeBtn || !reasonBtn) {
+  let reviewBtn = bar.querySelector("[data-review]");
+  if (!cog || !modeBtn || !reasonBtn || !reviewBtn) {
     bar.replaceChildren();
     cog = document.createElement("button");
     cog.type = "button";
@@ -3407,17 +3409,54 @@ function paintOptbar() {
     reasonBtn.type = "button";
     reasonBtn.className = "opt-chip";
     reasonBtn.addEventListener("click", (event) => openReasoningSheet(event.currentTarget));
-    bar.append(cog, modeBtn, reasonBtn);
+    reviewBtn = document.createElement("button");
+    reviewBtn.type = "button";
+    reviewBtn.className = "opt-chip";
+    reviewBtn.addEventListener("click", () => chooseReview(!reasoningChoice(currentReasoningState()).ultra));
+    bar.append(cog, modeBtn, reasonBtn, reviewBtn);
   }
   bar.hidden = false;
   modeBtn.dataset.mode = mode.id;
   modeBtn.textContent = mode.label;
   modeBtn.setAttribute("aria-label", "Mode, " + mode.label);
   reasonBtn.dataset.reasoning = reason.id;
-  reasonBtn.textContent = reasonText;
+  let modelEl = reasonBtn.querySelector(".opt-model");
+  let effortEl = reasonBtn.querySelector(".opt-effort");
+  if (!modelEl || !effortEl) {
+    reasonBtn.replaceChildren();
+    modelEl = document.createElement("span");
+    modelEl.className = "opt-model";
+    effortEl = document.createElement("span");
+    effortEl.className = "opt-effort";
+    reasonBtn.append(modelEl, effortEl);
+  }
+  modelEl.textContent = reasonParts.model + " ";
+  effortEl.textContent = reasonParts.effort;
   reasonBtn.setAttribute("aria-label", "Reasoning, " + reasonText);
-  if (reason.id === "ultra") reasonBtn.title = ULTRA_HELP;
-  else reasonBtn.removeAttribute("title");
+  reasonBtn.removeAttribute("title");
+  reviewBtn.dataset.review = reason.ultra ? "on" : "off";
+  reviewBtn.textContent = "Deep";
+  reviewBtn.setAttribute("aria-pressed", reason.ultra ? "true" : "false");
+  reviewBtn.setAttribute("aria-label", "Deep mode");
+  reviewBtn.title = REVIEW_HELP;
+  markOptbarScroll();
+}
+
+// The chip strip scrolls inside its own box when the row is short (a phone with Send now showing);
+// a fade on the clipped side says there is more.
+function markOptbarScroll() {
+  const bar = document.getElementById("optbar");
+  if (!bar || bar.hidden) return;
+  const more = [];
+  if (bar.scrollLeft > 1) more.push("start");
+  if (bar.scrollWidth - bar.scrollLeft - bar.clientWidth > 1) more.push("end");
+  const value = more.join(" ");
+  if ((bar.dataset.more || "") !== value) bar.dataset.more = value;
+}
+{
+  const bar = document.getElementById("optbar");
+  bar?.addEventListener("scroll", markOptbarScroll, { passive: true });
+  if (bar && "ResizeObserver" in window) new ResizeObserver(markOptbarScroll).observe(bar);
 }
 
 // The cog: Dark and Light apply at once; the rest of a session's settings open in the full panel.
@@ -3473,17 +3512,14 @@ function openReasoningSheet(anchor) {
   const options = [["low", "Low", "level1"], ["medium", "Medium", "level2"], ["high", "High", "level3"], ["xhigh", "Extra high", "level4"]];
   openSheet([
     ...options.map(([id, label, icon]) => ({ label, icon, selected: current.id === id, run: () => chooseReasoning(id) })),
-    { label: "Ultra", icon: "sparkle", title: ULTRA_HELP, selected: current.id === "ultra", run: () => chooseReasoning("ultra") },
-    { text: "Ultra plans, builds, reviews, and unslops in tiers. Based on pstack's poteto-mode.", info: true },
   ], anchor);
 }
 
-async function chooseReasoning(id) {
+async function saveReasoning(next) {
   closeSheet();
-  const next = applyReasoning(id);
   if (route().name !== "chat") {
-    app.draft.effort = next.effort;
-    app.draft.ultra = next.ultra;
+    if (next.effort != null) app.draft.effort = next.effort;
+    if (next.ultra != null) app.draft.ultra = next.ultra;
     paintOptbar();
     return;
   }
@@ -3494,6 +3530,15 @@ async function chooseReasoning(id) {
   } catch (error) {
     if (!error.auth) setNotice(error.message);
   }
+}
+
+function chooseReasoning(id) {
+  const current = reasoningChoice(currentReasoningState());
+  return saveReasoning(applyReasoning(id, { review: current.ultra }));
+}
+
+function chooseReview(on) {
+  return saveReasoning(applyReview(on));
 }
 
 async function chooseMode(id) {
@@ -3637,7 +3682,8 @@ function paintQueue() {
     row.className = "queued";
     const tag = document.createElement("span");
     tag.className = "q-tag";
-    tag.textContent = item.now ? "Sending" : index === 0 ? "Next" : "#" + (index + 1);
+    const steer = app.longRun?.status === "running" && !item.loop;
+    tag.textContent = item.now ? (steer ? "Steering" : "Sending") : index === 0 ? (steer ? "Steers next" : "Next") : "#" + (index + 1);
     const text = document.createElement("span");
     text.className = "q-text";
     text.textContent = (item.text || "") + (item.images ? " · " + item.images + " photo" + (item.images > 1 ? "s" : "") : "");
@@ -4847,36 +4893,172 @@ checkUpdatePending();
 setInterval(checkUpdatePending, 60000);
 
 
-// Long run status bar: heartbeat, budget and stop/resume.
+// Long run panel: one summary row (status, current step, elapsed, Stop or Resume) that opens
+// into the goal board: now / last done / next from PROGRESS.md, GOAL.md items and checks, budget.
 const longbar = document.getElementById("longbar");
+const LONG_OPEN_KEY = "deck.longrun.open";
 function agoText(ms) {
   const s = Math.max(0, Math.round(ms / 1000));
   return s < 90 ? s + "s ago" : Math.round(s / 60) + " min ago";
+}
+function hoursText(ms) {
+  const min = Math.max(0, Math.round(ms / 60000));
+  return min < 60 ? min + "m" : Math.floor(min / 60) + "h " + (min % 60) + "m";
+}
+function bigTokens(n) {
+  n = Number(n) || 0;
+  return n >= 1e6 ? (n / 1e6).toFixed(n >= 1e7 ? 0 : 1) + "M" : kTokens(n);
+}
+function longOpen() {
+  try {
+    return localStorage.getItem(LONG_OPEN_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+function setLongOpen(open) {
+  try {
+    localStorage.setItem(LONG_OPEN_KEY, open ? "1" : "0");
+  } catch {
+    // private mode keeps the visit
+  }
+  paintLongRun();
+}
+const LONG_LABELS = { running: "Running", paused: "Paused", done: "Done", blocked: "Blocked", budget: "Hit budget", stalled: "Stalled", stopped: "Stopped" };
+function longSub(lr) {
+  const steering = lr.steering;
+  if (lr.status === "running" && steering?.state === "replying") return "Steering with your message. The run resumes after.";
+  if (lr.status !== "running") return lr.note || "";
+  if (steering?.state === "done" && steering.changed && Date.now() - steering.at < 10 * 60000) return "Resumed the goal. Changed: " + steering.changed;
+  if (lr.board?.now) return "Now: " + lr.board.now;
+  return lr.note || "Working toward the goal";
+}
+function longGroup(title, ...rows) {
+  const group = document.createElement("div");
+  group.className = "lr-group";
+  const head = document.createElement("div");
+  head.className = "lr-head-label";
+  head.textContent = title;
+  group.append(head, ...rows);
+  return group;
+}
+function longRow(label, value, empty) {
+  const row = document.createElement("div");
+  row.className = "lr-row";
+  const k = document.createElement("span");
+  k.className = "lr-k";
+  k.textContent = label;
+  const v = document.createElement("span");
+  v.className = "lr-v" + (value ? "" : " lr-empty");
+  v.textContent = value || empty;
+  row.append(k, v);
+  return row;
+}
+function longItem(icon, state, text, status, code) {
+  const row = document.createElement("div");
+  row.className = "lr-item";
+  row.dataset.state = state;
+  const mark = lineIcon(icon);
+  const label = document.createElement(code ? "code" : "span");
+  label.className = "lr-text";
+  label.textContent = text;
+  row.append(mark, label);
+  if (status) {
+    const word = document.createElement("span");
+    word.className = "lr-status";
+    word.textContent = status;
+    row.append(word);
+  }
+  return row;
+}
+function longBody(lr) {
+  const body = document.createElement("div");
+  body.className = "lr-body";
+  body.id = "longbar-body";
+  const board = lr.board || {};
+  const steering = lr.steering;
+  if (steering) {
+    body.append(longGroup(
+      steering.state === "replying" ? "Steering now" : "Last steering",
+      longRow("You said", steering.text, ""),
+      longRow("Changed", steering.state === "replying" ? "" : steering.changed, steering.state === "replying" ? "Grok is replying, then resumes" : "Nothing named"),
+    ));
+  }
+  body.append(longGroup(
+    "Progress",
+    longRow("Now", board.now, board.hasProgress ? "Nothing in progress" : "PROGRESS.md comes with the first turn"),
+    longRow("Last done", board.last, "Nothing finished yet"),
+    longRow("Next", board.next, "No next step listed"),
+  ));
+  const items = board.items || [];
+  const checks = board.checks || [];
+  const goalRows = items.map((item) => longItem(item.done ? "check" : "minus", item.done ? "done" : "open", item.text));
+  const checkRows = checks.map((check) => longItem(check.ok === true ? "check" : check.ok === false ? "x" : "minus", check.ok === true ? "pass" : check.ok === false ? "fail" : "open", check.cmd, check.ok === true ? "Pass" : check.ok === false ? "Fail" : "Not run", true));
+  if (!goalRows.length) goalRows.push(longRow("Goal", "", board.hasGoal ? "No checklist in GOAL.md" : "GOAL.md comes with the first turn"));
+  body.append(longGroup("Goal", ...goalRows));
+  body.append(longGroup("Checks", ...(checkRows.length ? checkRows : [longRow("Checks", "", "No ## Checks in GOAL.md yet")])));
+  const elapsed = Date.now() - (lr.startedAt || Date.now());
+  const used = (lr.usedTokens || 0) + (lr.skepticTokens || 0);
+  body.append(longGroup(
+    "Budget",
+    longRow("Time", hoursText(elapsed) + " of " + lr.hours + "h", ""),
+    longRow("Turns", lr.turns + (lr.steers ? " · " + lr.steers + " steering" : "") + (lr.resumes ? " · " + lr.resumes + " resumes" : ""), ""),
+    longRow("Tokens", bigTokens(used) + " of " + bigTokens(lr.tokens), ""),
+    longRow("Active", lr.status === "running" && lr.lastActivity ? agoText(Date.now() - lr.lastActivity) : "", LONG_LABELS[lr.status] || ""),
+  ));
+  return body;
 }
 function paintLongRun(run) {
   if (run !== undefined) app.longRun = run || null;
   const lr = app.longRun;
   paintOptbar();
+  const steerHint = "Steer the long run";
+  const running = lr?.status === "running" && route().name === "chat";
+  if (running && input.placeholder === "Message") input.placeholder = steerHint;
+  else if (!running && input.placeholder === steerHint) input.placeholder = "Message";
   if (!longbar) return;
   if (!lr) {
     longbar.hidden = true;
     return;
   }
-  const labels = { running: "Long run", paused: "Long run paused", done: "Long run done", blocked: "Long run blocked", budget: "Long run hit budget", stalled: "Long run stalled", stopped: "Long run stopped" };
-  const elapsed = Date.now() - (lr.startedAt || Date.now());
-  const bits = [labels[lr.status] || "Long run", durationText(elapsed) + " / " + lr.hours + "h", lr.turns + " turns"];
-  if (lr.resumes) bits.push(lr.resumes + " resumes");
-  if (lr.status === "running" && lr.lastActivity) bits.push("active " + agoText(Date.now() - lr.lastActivity));
+  const open = longOpen();
+  const keepScroll = longbar.querySelector(".lr-body")?.scrollTop || 0;
   longbar.hidden = false;
   longbar.dataset.status = lr.status;
+  longbar.dataset.steering = lr.status === "running" && lr.steering?.state === "replying" ? "on" : "off";
   longbar.replaceChildren();
-  const text = document.createElement("span");
-  text.textContent = bits.join(" · ") + (lr.note && lr.status !== "running" ? " — " + lr.note : "");
-  const btn = document.createElement("button");
-  btn.type = "button";
-  btn.textContent = lr.status === "running" ? "Stop" : "Resume";
-  btn.addEventListener("click", () => longRunAction(lr.status === "running" ? "stop" : "resume"));
-  longbar.append(text, btn);
+  const head = document.createElement("div");
+  head.className = "lr-top";
+  const toggle = document.createElement("button");
+  toggle.type = "button";
+  toggle.className = "lr-toggle";
+  toggle.setAttribute("aria-expanded", open ? "true" : "false");
+  toggle.setAttribute("aria-controls", "longbar-body");
+  toggle.addEventListener("click", () => setLongOpen(!longOpen()));
+  const dot = document.createElement("span");
+  dot.className = "lr-dot";
+  const words = document.createElement("span");
+  words.className = "lr-words";
+  const title = document.createElement("span");
+  title.className = "lr-title";
+  const steeringNow = longbar.dataset.steering === "on";
+  title.textContent = "Long run · " + (steeringNow ? "Steering" : LONG_LABELS[lr.status] || lr.status);
+  const sub = document.createElement("span");
+  sub.className = "lr-sub";
+  sub.textContent = longSub(lr);
+  words.append(title, sub);
+  const meta = document.createElement("span");
+  meta.className = "lr-meta";
+  meta.textContent = hoursText(Date.now() - (lr.startedAt || Date.now())) + " / " + lr.hours + "h";
+  toggle.append(dot, words, meta, lineIcon("chevron"));
+  const act = button(lr.status === "running" ? "Stop run" : "Resume run", () => longRunAction(lr.status === "running" ? "stop" : "resume"), "lr-act");
+  head.append(toggle, act);
+  longbar.append(head);
+  if (open) {
+    const body = longBody(lr);
+    longbar.append(body);
+    body.scrollTop = keepScroll;
+  }
 }
 async function longRunAction(action, extra = {}) {
   if (!app.sessionId) return false;
